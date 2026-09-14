@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import time
 from typing import Any, Dict, List, Optional
@@ -5,15 +6,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-try:
-    from crewai import Agent, Crew, LLM, Process, Task
-    CREWAI_IMPORT_OK = True
-    CREWAI_IMPORT_ERROR = None
-except Exception as exc:
-    CREWAI_IMPORT_OK = False
-    CREWAI_IMPORT_ERROR = str(exc)
+CREWAI_AVAILABLE = importlib.util.find_spec('crewai') is not None
 
-app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.1.0')
+app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.2.0')
 
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini/gemini-2.5-flash').strip()
 OPENHANDS_API_URL = os.getenv('OPENHANDS_API_URL', '').strip().rstrip('/')
@@ -30,8 +25,8 @@ class ExecuteRequest(BaseModel):
 
 
 def crew_status(api_key: str = '') -> Dict[str, Any]:
-    if not CREWAI_IMPORT_OK:
-        return {'status': 'ERROR', 'error': CREWAI_IMPORT_ERROR}
+    if not CREWAI_AVAILABLE:
+        return {'status': 'ERROR', 'error': 'CrewAI package is not installed'}
     if not api_key:
         return {'status': 'READY', 'auth': 'per-request', 'model': GEMINI_MODEL}
     return {'status': 'CONNECTED', 'auth': 'per-request', 'model': GEMINI_MODEL}
@@ -52,7 +47,7 @@ async def openhands_status() -> Dict[str, Any]:
 @app.get('/health')
 async def health() -> Dict[str, Any]:
     return {
-        'ok': CREWAI_IMPORT_OK,
+        'ok': CREWAI_AVAILABLE,
         'service': 'nawaf-hq-agent-runtime',
         'crewai': crew_status(),
         'openhands': await openhands_status(),
@@ -68,7 +63,9 @@ async def status() -> Dict[str, Any]:
     }
 
 
-def make_crew(params: Dict[str, Any], api_key: str) -> Crew:
+def make_crew(params: Dict[str, Any], api_key: str):
+    from crewai import Agent, Crew, LLM, Process, Task
+
     goal = str(params.get('goal') or params.get('instruction') or params.get('objective') or '').strip()
     if not goal:
         raise ValueError('A goal/instruction is required')
@@ -182,9 +179,8 @@ async def execute(payload: ExecuteRequest) -> Dict[str, Any]:
                 f'{OPENHANDS_API_URL}/api/execute',
                 json={'action': payload.action, 'params': payload.params},
             )
-        data: Any
         try:
-            data = response.json()
+            data: Any = response.json()
         except Exception:
             data = {'text': response.text}
         return {
