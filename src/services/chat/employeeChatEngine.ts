@@ -24,181 +24,204 @@ export interface EmployeeChatContext {
   onTriggerApproval?: (params: { title: string; description: string; projectId: string }) => Decision | void;
 }
 
+function normalize(text: string) {
+  return text.trim().toLowerCase();
+}
+
+function hasAny(query: string, terms: string[]) {
+  return terms.some(term => query.includes(term));
+}
+
+function taskStatusLabel(status?: string) {
+  if (!status) return 'غير محدد';
+  const labels: Record<string, string> = {
+    completed: 'مكتملة',
+    in_progress: 'قيد التنفيذ',
+    needs_ceo: 'تحتاج قرار نواف',
+    blocked: 'متوقفة بسبب عائق',
+    pending: 'بانتظار البدء',
+  };
+  return labels[status] || status;
+}
+
 export async function processEmployeeMessage(
   userQuery: string,
   context: EmployeeChatContext
 ): Promise<{ text: string; executedTools: ToolExecutionResponse[] }> {
-  const query = userQuery.trim().toLowerCase();
+  const query = normalize(userQuery);
   const { employee, projectContext, taskContext, companyState } = context;
   const executedTools: ToolExecutionResponse[] = [];
   const adapter = ExecutionAdapter.getInstance();
 
-  // 1. Check if user is asking to modify code or run commands (Execution Engine check)
-  if (
-    query.includes('عدل') || 
-    query.includes('اكتب كود') || 
-    query.includes('غير الملف') || 
-    query.includes('احفظ التعديل') ||
-    query.includes('شغل الحاوية') ||
-    query.includes('نفذ الأمر') ||
-    query.includes('تنفيذ كود')
-  ) {
-    const execRes = await adapter.execute('modify_code', { query }, projectContext?.id);
+  if (hasAny(query, ['عدل', 'اكتب كود', 'غير الملف', 'احفظ التعديل', 'نفذ الأمر', 'تنفيذ كود', 'شغل الأمر'])) {
+    const execRes = await adapter.execute('modify_code', {
+      instruction: userQuery,
+      employeeId: employee.id,
+      employeeRole: employee.position,
+      projectId: projectContext?.id,
+    }, projectContext?.id);
+
+    if (execRes.ok) {
+      return {
+        text: `تم تنفيذ الطلب عبر محرك التنفيذ الحقيقي.\nالنتيجة:\n${JSON.stringify(execRes.output, null, 2)}`,
+        executedTools,
+      };
+    }
+
     return {
-      text: `${execRes.error || 'EXECUTION ENGINE: NOT CONFIGURED'}\nوفقاً للسياسة الصارمة للنظام، لا يمكن للموظف ادعاء تعديل الأكواد أو تشغيل أوامر برمجية ما لم يتصل محرك التنفيذ الخارجي الفعلي ويُعيد نتيجة نجاح حقيقية.`,
-      executedTools
+      text: `ما أقدر أدّعي أني عدلت الكود لأن محرك التنفيذ لم يؤكد نجاح العملية.\n${execRes.error || 'OPENHANDS: NOT_CONFIGURED'}`,
+      executedTools,
     };
   }
 
-  // 2. Query about Project status (Calls real backend POST /api/execute inspect_project_state)
-  if (
-    query.includes('وضع المشروع') || 
-    query.includes('وضع مشروع') || 
-    query.includes('مشروع معين') || 
-    query.includes('مشروع مُعين') || 
-    query.includes('مشروع قدها') || 
-    query.includes('مشروع قدّها') ||
-    query.includes('المشروع الحالي') ||
-    query.includes('حالة المشروع')
-  ) {
-    const targetProjId = projectContext?.id || (query.includes('معين') ? 'mueen' : 'qaddha');
-    const execRes = await adapter.execute('inspect_project_state', {}, targetProjId);
-
-    if (execRes.ok && execRes.output) {
-      const data = execRes.output;
-      const tasks = data.tasks || [];
-      const inProgress = tasks.filter((t: any) => t.status === 'in_progress');
-      const completed = tasks.filter((t: any) => t.status === 'completed');
-
-      const completedSummary = completed.length > 0
-        ? `المهام المكتملة فعلياً (${data.completedTasks}/${data.totalTasks}): ${completed.map((t: any) => `«${t.title}»`).join('، ')}.`
-        : 'لم تكتمل أي مهام بعد.';
-
-      const inProgressSummary = inProgress.length > 0
-        ? `المهام قيد العمل: ${inProgress.map((t: any) => `«${t.title}»`).join('، ')}.`
-        : 'لا توجد مهام قيد العمل حالياً.';
-
+  if (hasAny(query, ['وضع المشروع', 'وضع مشروع', 'المشروع الحالي', 'حالة المشروع', 'مشروع معين', 'مشروع مُعين', 'مشروع قدها', 'مشروع قدّها'])) {
+    if (!projectContext) {
       return {
-        text: `إليك الوضع الحقيقي المستلم مباشرة من خادم النظام (POST /api/execute):\n- اسم المشروع: «${data.projectName}»\n- نسبة الإنجاز المحسوبة رياضياً: ${data.calculatedProgress}%\n- الحالة التشغيلية: ${data.health}\n- الهدف: ${data.description}\n- ${completedSummary}\n- ${inProgressSummary}\n- التكلفة المالية: ${data.cost} (انعدام تكلفة تام $0.00).\n(تم التحقق الفعلي من ملفات المشروع على الخادم: ${data.verifiedOnDisk ? 'نعم ✓' : 'لا'})`,
-        executedTools
-      };
-    } else {
-      return {
-        text: `تعذر جلب حالة المشروع من الواجهة الخلفية: ${execRes.error}`,
-        executedTools
+        text: 'ما عندي مشروع مرتبط بهذه المحادثة حالياً، لذلك ما راح أخمّن حالة مشروع غير موجود في السياق.',
+        executedTools,
       };
     }
+
+    const registeredTasks = Array.isArray(projectContext.tasks) ? projectContext.tasks : [];
+    const taskLines = registeredTasks.length
+      ? registeredTasks.map(task => `- ${task.title}: ${taskStatusLabel(task.status)}`).join('\n')
+      : '- لا توجد مهام مسجلة على هذا المشروع في حالة NAWAF HQ الحالية.';
+
+    return {
+      text: `هذه هي الحالة المسجلة فعلياً داخل NAWAF HQ الآن، وليست نتيجة فحص خارجي للمستودع:\n- المشروع: ${projectContext.name}\n- المرحلة المسجلة: ${projectContext.currentPhase || 'غير محددة'}\n- التقدم المسجل: ${typeof projectContext.progress === 'number' ? `${projectContext.progress}%` : 'غير محدد'}\n- الحالة المسجلة: ${projectContext.health || 'غير محددة'}\nالمهام المسجلة:\n${taskLines}\n\nمهم: إذا تبغى حالة موثقة من مستودع المشروع نفسه، لازم يكون مستودع ذلك المشروع أو محرك التنفيذ متصل فعلياً.`,
+      executedTools,
+    };
   }
 
-  // 2. Check if user is asking to read a file or inspect repository
-  if (
-    query.includes('افتح ملف') || 
-    query.includes('اقرأ ملف') || 
-    query.includes('فحص المستودع') || 
-    query.includes('قراءة الملف') ||
-    query.includes('ملف المشروع') ||
-    query.includes('package.json')
-  ) {
-    // Determine target file
+  if (hasAny(query, ['افتح ملف', 'اقرأ ملف', 'فحص المستودع', 'قراءة الملف', 'ملف المشروع', 'package.json'])) {
     let targetFile = 'package.json';
     if (query.includes('types')) targetFile = 'src/types.ts';
     if (query.includes('server')) targetFile = 'server.ts';
 
-    // Execute real read via ToolRouter
     const router = ToolRouter.getInstance();
+    const tool = query.includes('فحص المستودع') ? 'inspect_repository' : 'read_file';
     const toolRes = await router.route({
-      tool: query.includes('فحص المستودع') ? 'inspect_repository' : 'read_file',
+      tool,
       params: { filePath: targetFile },
       requestedBy: {
         agentId: employee.id,
         agentName: employee.name,
-        role: employee.position
+        role: employee.position,
       },
-      projectId: projectContext?.id
+      projectId: projectContext?.id,
     });
 
     executedTools.push(toolRes);
 
-    if (toolRes.success && toolRes.data) {
-      if (toolRes.tool === 'read_file') {
-        const preview = toolRes.data.content.slice(0, 350);
-        return {
-          text: `تمت قراءة الملف الفعلي (${targetFile}) من مسار القرص بنجاح عبر الواجهة الخلفية:\n\n\`\`\`\n${preview}...\n\`\`\`\nالحجم الفعلي: ${toolRes.data.sizeBytes} بايت. تم جلب المحتوى من ملفات النظام الحقيقية.`,
-          executedTools
-        };
-      } else if (toolRes.tool === 'inspect_repository') {
-        return {
-          text: `تم فحص مستودع العمل الفعلي عبر الواجهة الخلفية بنجاح:\n- إجمالي الملفات المرصودة: ${toolRes.data.totalFiles} ملف.\n- الحزمة الأساسية: ${toolRes.data.packageJson?.name} (الإصدار ${toolRes.data.packageJson?.version}).\n- عينة من الملفات الموجودة: ${toolRes.data.files.slice(0, 5).join(', ')}...`,
-          executedTools
-        };
-      }
-    } else {
+    if (!toolRes.success || !toolRes.data) {
       return {
-        text: `تعذر قراءة الملف: ${toolRes.error || 'الملف غير موجود على القرص أو غير متاح'}.\nلن أقوم باختلاق أي محتوى وهمي.`,
-        executedTools
+        text: `تعذر تنفيذ ${tool === 'read_file' ? 'قراءة الملف' : 'فحص المستودع'} فعلياً: ${toolRes.error || 'خطأ غير معروف'}. لن أختلق نتيجة بديلة.`,
+        executedTools,
       };
     }
+
+    if (tool === 'read_file') {
+      const content = String(toolRes.data.content || '');
+      const preview = content.slice(0, 500);
+      return {
+        text: `قرأت الملف الفعلي «${targetFile}» من مساحة عمل NAWAF-AI-2.\nالحجم: ${toolRes.data.sizeBytes} بايت.\n${toolRes.data.truncated ? 'المحتوى المعروض مختصر لأن الملف كبير.\n' : ''}\n\`\`\`\n${preview}\n\`\`\``,
+        executedTools,
+      };
+    }
+
+    return {
+      text: `فحصت مساحة عمل NAWAF-AI-2 الفعلية.\n- الملفات التي تم مسحها: ${toolRes.data.totalFilesScanned ?? toolRes.data.files?.length ?? 0}\n- الحزمة: ${toolRes.data.packageJson?.name || 'غير محددة'}\n- الإصدار: ${toolRes.data.packageJson?.version || 'غير محدد'}\n- عينة ملفات: ${(toolRes.data.files || []).slice(0, 8).join(', ') || 'لا توجد ملفات مرصودة'}`,
+      executedTools,
+    };
   }
 
-  // 3. Check if user asks to run automated test or linter
-  if (query.includes('فحص الكود') || query.includes('شغل الفحص') || query.includes('اختبار') || query.includes('لينتر')) {
+  if (hasAny(query, ['فحص الكود', 'شغل الفحص', 'لينتر', 'lint'])) {
     const router = ToolRouter.getInstance();
     const toolRes = await router.route({
       tool: 'run_linter',
       requestedBy: {
         agentId: employee.id,
         agentName: employee.name,
-        role: employee.position
+        role: employee.position,
       },
-      projectId: projectContext?.id
+      projectId: projectContext?.id,
     });
-
     executedTools.push(toolRes);
 
-    if (toolRes.success && toolRes.data) {
+    if (toolRes.success) {
       return {
-        text: `تم تشغيل فحص التحقق البرمجي الفعلي (TypeScript Compiler / Linter) عبر الخادم:\n- الأمر المنفذ: \`${toolRes.data.command}\`\n- حالة الخروج: ${toolRes.data.exitCode} (${toolRes.data.status})\n- مخرجات الفحص: ${toolRes.data.stdout || 'اجتياز تام بدون أخطاء نوعية'}\n- استغرق الفحص: ${toolRes.durationMs}ms.`,
-        executedTools
-      };
-    } else {
-      return {
-        text: `تم تشغيل الفحص البرمجي الفعلي ورصدت الأخطاء التالية:\n${toolRes.data?.stderr || toolRes.error}`,
-        executedTools
+        text: `تم تشغيل الفحص الحقيقي.\nالأمر: ${toolRes.data?.command}\nالحالة: ${toolRes.data?.status}\n${toolRes.data?.stdout || 'لم يُرجع الفحص أخطاء.'}`,
+        executedTools,
       };
     }
-  }
 
-  // 4. Check if user requests CEO Approval
-  if (query.includes('طلب موافقة') || query.includes('اعتماد') || query.includes('موافقة الرئيس') || query.includes('أرسل للاعتماد')) {
-    if (context.onTriggerApproval) {
-      const title = `طلب اعتماد من ${employee.name}: ${taskContext?.currentTask || 'مراجعة إجراءات المشروع'}`;
-      const desc = `يرفع ${employee.name} (${employee.position}) طلباً رسمياً لمراجعة وتوقيع الرئيس التنفيذي نواف لمشروع «${projectContext?.name || 'الشركة'}».`;
-      const newDec = context.onTriggerApproval({
-        title,
-        description: desc,
-        projectId: projectContext?.id || 'all'
-      });
-
-      const decId = newDec ? (newDec as Decision).id : 'طلب جديد';
-
-      return {
-        text: `تم إنشاء قرار اعتماد حقيقي في النظام بنجاح برقم (${decId}).\nيمكنك الآن الانتقال إلى «مركز قرارات الرئيس التنفيذي» (CEO Approvals) لمراجعته وتوقيعه، وسينعكس توقيعك فوراً على مسار العمل.`,
-        executedTools
-      };
-    }
-  }
-
-  // 5. Query about Task status
-  if (query.includes('مهمتك') || query.includes('تشتغل على') || query.includes('وش تسوي')) {
     return {
-      text: `مهمتي المسجلة حالياً في النظام هي: «${taskContext?.currentTask || employee.currentTask}» في مشروع «${projectContext?.name || 'الشركة'}».\nنسبة إنجاز هذه المهمة وفق السجلات: ${taskContext?.taskProgress || employee.taskProgress || 0}%.\nالصلاحيات الممنوحة لي: ${employee.permissions?.join(', ') || 'صلاحيات قياسية'}.`,
-      executedTools
+      text: `الفحص الحقيقي لم ينجح أو غير مهيأ.\n${toolRes.data?.stderr || toolRes.error || 'لا توجد نتيجة'}`,
+      executedTools,
     };
   }
 
-  // 7. General truthful answer grounded in role & company state
+  if (hasAny(query, ['اختبار', 'tests', 'test'])) {
+    const router = ToolRouter.getInstance();
+    const toolRes = await router.route({
+      tool: 'run_tests',
+      requestedBy: {
+        agentId: employee.id,
+        agentName: employee.name,
+        role: employee.position,
+      },
+      projectId: projectContext?.id,
+    });
+    executedTools.push(toolRes);
+
+    if (toolRes.success) {
+      return {
+        text: `تم تشغيل الاختبارات الحقيقية بنجاح.\nالأمر: ${toolRes.data?.command}\nالحالة: ${toolRes.data?.status}\n${toolRes.data?.stdout || ''}`,
+        executedTools,
+      };
+    }
+
+    return {
+      text: `لم يتم اجتياز اختبارات حقيقية.\n${toolRes.error || toolRes.data?.stderr || 'اختبارات المشروع غير مهيأة.'}`,
+      executedTools,
+    };
+  }
+
+  if (hasAny(query, ['طلب موافقة', 'اعتماد', 'موافقة الرئيس', 'أرسل للاعتماد'])) {
+    if (!context.onTriggerApproval) {
+      return { text: 'مسار الموافقات غير متاح في هذا السياق، لذلك لم أنشئ طلباً وهمياً.', executedTools };
+    }
+
+    const title = `طلب اعتماد من ${employee.name}: ${taskContext?.currentTask || employee.currentTask || 'إجراء جديد'}`;
+    const description = `طلب اعتماد حقيقي أنشأه ${employee.name} (${employee.position}) للمشروع «${projectContext?.name || 'الشركة'}».`;
+    const decision = context.onTriggerApproval({
+      title,
+      description,
+      projectId: projectContext?.id || 'all',
+    });
+
+    if (!decision) {
+      return { text: 'تعذر إنشاء طلب الاعتماد في حالة النظام، لذلك لم أعتبره ناجحاً.', executedTools };
+    }
+
+    return {
+      text: `تم إنشاء طلب اعتماد فعلي داخل NAWAF HQ برقم ${decision.id}. ستجده في مركز القرارات.`,
+      executedTools,
+    };
+  }
+
+  if (hasAny(query, ['مهمتك', 'تشتغل على', 'وش تسوي', 'وش تعمل'])) {
+    const currentTask = taskContext?.currentTask || employee.currentTask;
+    const progress = taskContext?.taskProgress ?? employee.taskProgress;
+    return {
+      text: `أنا ${employee.name}، ${employee.position}.\nالمهمة المسجلة لي الآن: ${currentTask || 'لا توجد مهمة حالية مسجلة'}.\nالمشروع: ${projectContext?.name || 'لا يوجد مشروع مرتبط'}.\nالتقدم المسجل: ${typeof progress === 'number' ? `${progress}%` : 'غير محدد'}.\nالصلاحيات: ${employee.permissions?.length ? employee.permissions.join(', ') : 'لا توجد صلاحيات أدوات خاصة مسجلة'}.`,
+      executedTools,
+    };
+  }
+
+  const previous = context.previousRelevantResults?.filter(Boolean).slice(-3) || [];
   return {
-    text: `أنا ${employee.name}، ${employee.position} في قسم ${employee.departmentName}.\nأعمل حالياً على: «${taskContext?.currentTask || employee.currentTask}» لمشروع «${projectContext?.name || 'الشركة'}».\n\nحالة الشركة العامة: ${companyState.isOperating ? 'العمليات نشطة' : 'متوقفة مؤقتاً'}، وهناك ${companyState.pendingApprovalsCount} قرارات بانتظار توقيع الرئيس التنفيذي.\nإذا أردت فحص حالة المشروع أو قراءة ملف حقيقي أو رفع طلب اعتماد، حدد لي وسأقوم بالإجراء الحقيقي.`,
-    executedTools
+    text: `أنا ${employee.name}، ${employee.position} في ${employee.departmentName}.\nالحالة الحالية المسجلة: ${employee.status}.\nالمهمة الحالية: ${taskContext?.currentTask || employee.currentTask || 'لا توجد مهمة مسجلة'}.\nالمشروع المرتبط: ${projectContext?.name || 'لا يوجد'}.\nحالة الشركة: ${companyState.isOperating ? 'نشطة' : 'متوقفة'}، وخطط التنفيذ النشطة: ${companyState.activePlansCount}، والقرارات المعلقة: ${companyState.pendingApprovalsCount}.${previous.length ? `\nآخر نتائج مرتبطة مسجلة:\n- ${previous.join('\n- ')}` : ''}\n\nإذا طلبت مني تنفيذ شيء خارج الأدوات المتصلة فعلياً، سأقول لك إنه غير متاح بدلاً من ادعاء التنفيذ.`,
+    executedTools,
   };
 }
