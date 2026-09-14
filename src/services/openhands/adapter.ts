@@ -40,7 +40,7 @@ export class OpenHandsAdapter {
   private state: OpenHandsAdapterState = {
     status: 'NOT_CONFIGURED',
     endpoint: null,
-    lastChecked: new Date().toISOString()
+    lastChecked: new Date().toISOString(),
   };
 
   private constructor() {}
@@ -55,27 +55,33 @@ export class OpenHandsAdapter {
   public async checkStatus(): Promise<OpenHandsAdapterState> {
     try {
       const res = await fetch('/api/orchestrator/status');
-      if (res.ok) {
-        const data = await res.json();
-        this.state = {
-          status: data.openhands?.status || 'NOT_CONFIGURED',
-          endpoint: data.openhands?.endpoint || null,
-          lastChecked: new Date().toISOString()
-        };
-      } else {
+      if (!res.ok) {
         this.state = {
           status: 'UNAVAILABLE',
           endpoint: null,
           lastChecked: new Date().toISOString(),
-          error: `Server responded with status ${res.status}`
+          error: `Server responded with status ${res.status}`,
         };
+        return this.state;
       }
-    } catch (err: any) {
+      const data = await res.json();
+      const backendStatus = data.openhands?.status;
+      this.state = {
+        status: backendStatus === 'CONNECTED'
+          ? 'CONNECTED'
+          : backendStatus === 'NOT_CONFIGURED'
+            ? 'NOT_CONFIGURED'
+            : 'UNAVAILABLE',
+        endpoint: data.openhands?.endpoint || null,
+        lastChecked: new Date().toISOString(),
+        error: backendStatus === 'ERROR' ? 'OpenHands health check failed.' : undefined,
+      };
+    } catch (error: any) {
       this.state = {
         status: 'UNAVAILABLE',
         endpoint: null,
         lastChecked: new Date().toISOString(),
-        error: err.message || 'Failed to check OpenHands status'
+        error: error?.message || 'Failed to check OpenHands status',
       };
     }
     return this.state;
@@ -85,29 +91,23 @@ export class OpenHandsAdapter {
     return this.state;
   }
 
-  /**
-   * Execute real tool via backend Tool Router
-   */
   public async executeTool(tool: string, params?: any): Promise<{ success: boolean; data?: any; error?: string; status?: OpenHandsStatus }> {
     try {
       const res = await fetch('/api/tools/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool, params })
+        body: JSON.stringify({ tool, params }),
       });
-      const data = await res.json();
-      return data;
-    } catch (err: any) {
+      return await res.json();
+    } catch (error: any) {
       return {
         success: false,
-        error: err.message || 'فشل الاتصال بالواجهة الخلفية لتنفيذ الأداة'
+        status: 'UNAVAILABLE',
+        error: error?.message || 'فشل الاتصال بالواجهة الخلفية لتنفيذ الأداة',
       };
     }
   }
 
-  /**
-   * Inspect actual files in the repository
-   */
   public async inspectRepository(): Promise<{ success: boolean; files?: string[]; totalFiles?: number; packageJson?: any; error?: string }> {
     const res = await this.executeTool('inspect_repository');
     if (res.success && res.data) {
@@ -115,52 +115,45 @@ export class OpenHandsAdapter {
         success: true,
         files: res.data.files,
         totalFiles: res.data.totalFilesScanned,
-        packageJson: res.data.packageJson
+        packageJson: res.data.packageJson,
       };
     }
     return { success: false, error: res.error || 'فشل فحص المستودع' };
   }
 
-  /**
-   * Read actual file from the workspace
-   */
   public async readFile(filePath: string): Promise<{ success: boolean; content?: string; sizeBytes?: number; error?: string }> {
     const res = await this.executeTool('read_file', { filePath });
     if (res.success && res.data) {
       return {
         success: true,
         content: res.data.content,
-        sizeBytes: res.data.sizeBytes
+        sizeBytes: res.data.sizeBytes,
       };
     }
     return { success: false, error: res.error || `تعذر قراءة الملف: ${filePath}` };
   }
 
-  /**
-   * Run real linter / type checks
-   */
   public async runLinter(): Promise<{ success: boolean; stdout?: string; stderr?: string; exitCode?: number; error?: string }> {
     const res = await this.executeTool('run_linter');
     if (res.data) {
       return {
-        success: res.data.exitCode === 0,
+        success: Boolean(res.success),
         stdout: res.data.stdout,
         stderr: res.data.stderr,
-        exitCode: res.data.exitCode
+        exitCode: res.data.exitCode,
+        error: res.error,
       };
     }
     return { success: false, error: res.error || 'تعذر تشغيل الفحص البرمجي' };
   }
 
-  /**
-   * Modify file (Requires OpenHands remote runtime)
-   */
-  public async modifyFile(filePath: string, content: string): Promise<{ success: boolean; error: string; status: OpenHandsStatus }> {
+  public async modifyFile(filePath: string, content: string): Promise<{ success: boolean; error?: string; status: OpenHandsStatus; data?: any }> {
     const res = await this.executeTool('modify_file', { filePath, content });
     return {
-      success: false,
-      status: (res.status as OpenHandsStatus) || 'NOT_CONFIGURED',
-      error: res.error || 'التنفيذ البرمجي غير متصل حاليًا (OpenHands: NOT_CONFIGURED).'
+      success: Boolean(res.success),
+      status: (res.status as OpenHandsStatus) || (res.success ? 'CONNECTED' : 'UNAVAILABLE'),
+      error: res.error,
+      data: res.data,
     };
   }
 }
