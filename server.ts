@@ -4,11 +4,10 @@ import fs from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI } from '@google/genai';
 
 const execAsync = promisify(exec);
-
 type EngineStatus = 'CONNECTED' | 'NOT_CONFIGURED' | 'ERROR';
-
 const workspaceRoot = process.cwd();
 
 async function pingEngine(url?: string | null): Promise<EngineStatus> {
@@ -31,7 +30,6 @@ async function readPackageJson() {
 async function scanWorkspace(maxFiles = 120) {
   const ignored = new Set(['node_modules', 'dist', '.git', '.next', '.cache', 'coverage']);
   const files: string[] = [];
-
   async function walk(dir: string): Promise<void> {
     if (files.length >= maxFiles) return;
     const entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -39,14 +37,10 @@ async function scanWorkspace(maxFiles = 120) {
       if (files.length >= maxFiles) break;
       if (ignored.has(entry.name)) continue;
       const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(fullPath);
-      } else {
-        files.push(path.relative(workspaceRoot, fullPath));
-      }
+      if (entry.isDirectory()) await walk(fullPath);
+      else files.push(path.relative(workspaceRoot, fullPath));
     }
   }
-
   await walk(workspaceRoot);
   return files;
 }
@@ -67,11 +61,11 @@ async function engineSnapshot() {
     pingEngine(crewaiUrl),
     pingEngine(openhandsUrl),
   ]);
-
   return {
     executionEngine: openhandsStatus,
     crewai: { status: crewaiStatus, endpoint: crewaiUrl },
     openhands: { status: openhandsStatus, endpoint: openhandsUrl },
+    gemini: { status: process.env.GEMINI_API_KEY ? 'CONNECTED' : 'NOT_CONFIGURED' },
     localBackend: {
       status: 'CONNECTED' as const,
       nodeVersion: process.version,
@@ -81,10 +75,13 @@ async function engineSnapshot() {
   };
 }
 
+function sanitizeContext(value: unknown) {
+  return JSON.parse(JSON.stringify(value ?? null));
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
-
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => {
@@ -99,7 +96,6 @@ async function startServer() {
     const snapshot = await engineSnapshot();
     const pkg = await readPackageJson().catch(() => ({ scripts: {} }));
     const scripts = pkg.scripts || {};
-
     res.json({
       crewai: {
         ...snapshot.crewai,
@@ -115,6 +111,7 @@ async function startServer() {
           ? ['modify_file', 'run_command', 'sandbox_execution']
           : [],
       },
+      gemini: snapshot.gemini,
       localExecution: {
         status: 'CONNECTED',
         type: 'workspace_backend',
@@ -128,17 +125,57 @@ async function startServer() {
     });
   });
 
+  app.post('/api/agent/respond', async (req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ ok: false, error: 'GEMINI_API_KEY is not configured.' });
+    }
+
+    const { userMessage, context } = req.body || {};
+    if (!userMessage || typeof userMessage !== 'string') {
+      return res.status(400).json({ ok: false, error: 'userMessage is required.' });
+    }
+
+    try {
+      const safe = sanitizeContext(context);
+      const prompt = `
+You are an AI employee inside NAWAF HQ. Reply in concise natural Saudi Arabic unless the user asks for another language.
+
+STRICT TRUTHFULNESS RULES:
+- Use ONLY the supplied context and real tool results.
+- Never claim a file was read, code was modified, a command ran, tests passed, a repository was inspected, a meeting happened, or a task completed unless a real tool result in the context proves it.
+- If a capability is unavailable or not configured, say that plainly.
+- Do not invent percentages, milestones, progress, blockers, project state, costs, or deadlines.
+- Speak as the employee defined in the context, respecting that employee's role, permissions, project, current task, and previous real results.
+- Be useful: discuss options, reasoning, tradeoffs, and next steps relevant to the employee role.
+- Avoid filler like "توجيهك واضح" unless it adds real value.
+
+CONTEXT:
+${JSON.stringify(safe)}
+
+USER MESSAGE:
+${userMessage}
+`;
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+      const text = String((response as any).text || '').trim();
+      if (!text) return res.status(502).json({ ok: false, error: 'Gemini returned an empty response.' });
+      return res.json({ ok: true, text });
+    } catch (error: any) {
+      return res.status(500).json({ ok: false, error: error?.message || 'Agent response failed.' });
+    }
+  });
+
   app.post('/api/execute', async (req, res) => {
     const startedAt = new Date().toISOString();
     const { action, params } = req.body || {};
-
     if (!action || typeof action !== 'string') {
       return res.status(400).json({
-        ok: false,
-        action: 'unknown',
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        output: null,
+        ok: false, action: 'unknown', startedAt,
+        finishedAt: new Date().toISOString(), output: null,
         error: 'Action parameter is required.',
       });
     }
@@ -162,7 +199,7 @@ async function startServer() {
             dependencies: Object.keys(pkg.dependencies || {}),
             totalFilesScanned: files.length,
             files,
-            note: 'This response contains only facts read from the current NAWAF-AI-2 workspace. It does not invent project tasks, progress, health, or milestones.',
+            note: 'Only facts read from the current NAWAF-AI-2 workspace are returned. No project tasks, progress, health, or milestones are invented.',
           },
           error: null,
         });
@@ -172,21 +209,13 @@ async function startServer() {
         const crewaiUrl = process.env.CREWAI_API_URL;
         if (!crewaiUrl) {
           return res.json({
-            ok: false,
-            action,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            output: null,
+            ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
             error: 'CREWAI: NOT_CONFIGURED. CREWAI_API_URL is not configured.',
           });
         }
         if (await pingEngine(crewaiUrl) !== 'CONNECTED') {
           return res.status(502).json({
-            ok: false,
-            action,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            output: null,
+            ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
             error: 'CREWAI: ERROR. The configured service did not pass its health check.',
           });
         }
@@ -196,7 +225,7 @@ async function startServer() {
           body: JSON.stringify({ action, params }),
           signal: AbortSignal.timeout(120000),
         });
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         return res.status(response.ok ? 200 : 502).json({
           ok: response.ok,
           action,
@@ -211,21 +240,13 @@ async function startServer() {
         const openhandsUrl = process.env.OPENHANDS_API_URL;
         if (!openhandsUrl) {
           return res.json({
-            ok: false,
-            action,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            output: null,
+            ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
             error: 'OPENHANDS: NOT_CONFIGURED. OPENHANDS_API_URL is not configured.',
           });
         }
         if (await pingEngine(openhandsUrl) !== 'CONNECTED') {
           return res.status(502).json({
-            ok: false,
-            action,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            output: null,
+            ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
             error: 'OPENHANDS: ERROR. The configured service did not pass its health check.',
           });
         }
@@ -235,7 +256,7 @@ async function startServer() {
           body: JSON.stringify({ action, params }),
           signal: AbortSignal.timeout(120000),
         });
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         return res.status(response.ok ? 200 : 502).json({
           ok: response.ok,
           action,
@@ -247,20 +268,12 @@ async function startServer() {
       }
 
       return res.status(400).json({
-        ok: false,
-        action,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        output: null,
+        ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
         error: `Action "${action}" is not supported.`,
       });
     } catch (error: any) {
       return res.status(500).json({
-        ok: false,
-        action,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        output: null,
+        ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
         error: error?.message || 'Internal execution error.',
       });
     }
@@ -269,7 +282,6 @@ async function startServer() {
   app.post('/api/tools/execute', async (req, res) => {
     const { tool, params } = req.body || {};
     const started = Date.now();
-
     try {
       if (tool === 'inspect_repository') {
         const pkg = await readPackageJson();
@@ -320,19 +332,13 @@ async function startServer() {
         const scriptName = tool === 'run_linter' ? 'lint' : 'test';
         if (!pkg.scripts?.[scriptName]) {
           return res.json({
-            success: false,
-            tool,
-            status: 'NOT_CONFIGURED',
-            durationMs: Date.now() - started,
+            success: false, tool, status: 'NOT_CONFIGURED', durationMs: Date.now() - started,
             error: `npm script "${scriptName}" is not configured in package.json.`,
           });
         }
         const command = `npm run ${scriptName}`;
         try {
-          const { stdout, stderr } = await execAsync(command, {
-            cwd: workspaceRoot,
-            timeout: 60000,
-          });
+          const { stdout, stderr } = await execAsync(command, { cwd: workspaceRoot, timeout: 60000 });
           return res.json({
             success: true,
             tool,
@@ -374,10 +380,11 @@ async function startServer() {
           body: JSON.stringify({ tool, params }),
           signal: AbortSignal.timeout(120000),
         });
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         return res.status(response.ok ? 200 : 502).json({
           success: response.ok,
           tool,
+          status: response.ok ? 'CONNECTED' : 'ERROR',
           data: response.ok ? data : undefined,
           error: response.ok ? undefined : (data?.error || 'OpenHands execution failed.'),
         });
@@ -390,17 +397,12 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(workspaceRoot, 'dist');
     app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
 
   app.listen(PORT, '0.0.0.0', () => {
