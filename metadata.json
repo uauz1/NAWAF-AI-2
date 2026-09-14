@@ -1,0 +1,6 @@
+{
+  "name": "Nawaf HQ",
+  "description": "نظام تشغيل وإدارة شركة الذكاء الاصطناعي الخاصة بنواف — مركز القيادة والتحكم الذاتي للمشاريع والموظفين والقرارات",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
