@@ -9,12 +9,13 @@ import { GoogleGenAI } from '@google/genai';
 const execAsync = promisify(exec);
 type EngineStatus = 'CONNECTED' | 'NOT_CONFIGURED' | 'ERROR';
 const workspaceRoot = process.cwd();
+const DEFAULT_CREWAI_API_URL = 'https://nawaf-hq-crewai-runtime.onrender.com';
 
 async function pingEngine(url?: string | null): Promise<EngineStatus> {
   if (!url) return 'NOT_CONFIGURED';
   try {
     const response = await fetch(`${url.replace(/\/$/, '')}/health`, {
-      signal: AbortSignal.timeout(2500),
+      signal: AbortSignal.timeout(5000),
     });
     return response.ok ? 'CONNECTED' : 'ERROR';
   } catch {
@@ -55,7 +56,7 @@ function safeWorkspacePath(relativePath: string) {
 }
 
 async function engineSnapshot() {
-  const crewaiUrl = process.env.CREWAI_API_URL || null;
+  const crewaiUrl = process.env.CREWAI_API_URL || DEFAULT_CREWAI_API_URL;
   const openhandsUrl = process.env.OPENHANDS_API_URL || null;
   const [crewaiStatus, openhandsStatus] = await Promise.all([
     pingEngine(crewaiUrl),
@@ -206,11 +207,12 @@ ${userMessage}
       }
 
       if (action === 'orchestrate' || action === 'create_plan') {
-        const crewaiUrl = process.env.CREWAI_API_URL;
-        if (!crewaiUrl) {
-          return res.json({
+        const crewaiUrl = process.env.CREWAI_API_URL || DEFAULT_CREWAI_API_URL;
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) {
+          return res.status(503).json({
             ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
-            error: 'CREWAI: NOT_CONFIGURED. CREWAI_API_URL is not configured.',
+            error: 'GEMINI_API_KEY is not configured in the NAWAF HQ backend.',
           });
         }
         if (await pingEngine(crewaiUrl) !== 'CONNECTED') {
@@ -221,18 +223,19 @@ ${userMessage}
         }
         const response = await fetch(`${crewaiUrl.replace(/\/$/, '')}/api/orchestrate`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Gemini-Key': apiKey },
           body: JSON.stringify({ action, params }),
           signal: AbortSignal.timeout(120000),
         });
         const data = await response.json().catch(() => ({}));
-        return res.status(response.ok ? 200 : 502).json({
-          ok: response.ok,
+        const successful = response.ok && data?.ok !== false;
+        return res.status(successful ? 200 : 502).json({
+          ok: successful,
           action,
           startedAt,
           finishedAt: new Date().toISOString(),
-          output: response.ok ? data : null,
-          error: response.ok ? null : (data?.error || 'CrewAI execution failed.'),
+          output: successful ? data : null,
+          error: successful ? null : (data?.error || data?.detail || 'CrewAI execution failed.'),
         });
       }
 
