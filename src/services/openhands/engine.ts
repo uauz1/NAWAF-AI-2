@@ -1,4 +1,22 @@
 import { OpenHandsExecutionResult, OpenHandsLogEntry } from './types';
+import { OpenHandsAdapter } from './openHandsAdapter';
+
+function nowAr() {
+  return new Date().toLocaleTimeString('ar-SA', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function stringifyResult(value: unknown) {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
 
 export class OpenHandsEngine {
   private static instance: OpenHandsEngine;
@@ -12,9 +30,6 @@ export class OpenHandsEngine {
     return OpenHandsEngine.instance;
   }
 
-  /**
-   * Execute real technical tasks dispatched by CrewAI
-   */
   public async executeTechnicalTask(params: {
     agentId: string;
     agentName: string;
@@ -22,49 +37,23 @@ export class OpenHandsEngine {
     taskTitle: string;
     objective: string;
   }): Promise<OpenHandsExecutionResult> {
-    const startTime = Date.now();
-    const sessionId = `oh-session-${Math.random().toString(36).substring(2, 9)}`;
-    const timeStr = new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    
-    const logs: OpenHandsLogEntry[] = [];
-    const filesInspected: string[] = [];
+    const sessionId = `oh-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const startedAt = nowAr();
+    const adapter = OpenHandsAdapter.getInstance();
+    const status = await adapter.checkHealth();
 
-    // Simulate realistic async OpenHands sandbox execution delay
-    await new Promise(r => setTimeout(r, 600));
-
-    if (params.projectId === 'qaddha') {
-      // Qaddha technical sandbox execution
-      filesInspected.push('src/qaddha/webrtc/meshConnection.ts', 'src/qaddha/games/challenges.json', 'src/qaddha/state/roomManager.ts');
-
-      logs.push({
-        id: `${sessionId}-1`,
-        timestamp: timeStr,
-        action: 'file_read',
-        targetFile: 'src/qaddha/webrtc/meshConnection.ts',
-        observation: 'فحص ملف اتصال WebRTC: الكود يعتمد على قنوات DataChannel المباشرة بدون وساطة خوادم مأجورة. تم التحقق من تهيئة STUN العامة المجانية.',
-        exitCode: 0,
-        durationMs: 42
-      });
-
-      logs.push({
-        id: `${sessionId}-2`,
-        timestamp: timeStr,
+    if (status !== 'CONNECTED') {
+      const logs: OpenHandsLogEntry[] = [{
+        id: `${sessionId}-status`,
+        timestamp: startedAt,
         action: 'cmd_run',
-        command: 'node ./tests/webrtc-latency-benchmark.js --peers=8 --mode=stress',
-        observation: `[OpenHands Sandbox STDOUT]\n> Initializing 8 virtual peer nodes...\n> P2P Mesh Handshake: SUCCESS (31ms)\n> Packet Loss Rate: 0.00%\n> Average Latency: 36.4ms (هدف < 50ms محقق)\n> Memory Peak: 16.2 MB\n> Exit status: 0 (OK)`,
-        exitCode: 0,
-        durationMs: 180
-      });
-
-      logs.push({
-        id: `${sessionId}-3`,
-        timestamp: timeStr,
-        action: 'test_run',
-        command: 'npm run test:games -- --suites=all-12-challenges',
-        observation: `[OpenHands Automated Test Suite]\nPASS  tests/games/pantomime.test.ts (12ms)\nPASS  tests/games/speed-challenge.test.ts (18ms)\nPASS  tests/games/trivia-quiz.test.ts (14ms)\nTest Suites: 3 passed, 3 total\nTests: 12 passed, 0 failed, 12 total\nSnapshots: 0 total\nTime: 0.44s`,
-        exitCode: 0,
-        durationMs: 220
-      });
+        observation: status === 'NOT_CONFIGURED'
+          ? 'OpenHands غير متصل فعلياً. لم يتم تنفيذ أي أمر أو قراءة أي ملف.'
+          : 'تعذر الوصول إلى خدمة OpenHands. لم يتم تنفيذ أي أمر أو قراءة أي ملف.',
+        exitCode: 1,
+        durationMs: 0,
+        isError: true,
+      }];
 
       return {
         sessionId,
@@ -72,53 +61,77 @@ export class OpenHandsEngine {
         agentName: params.agentName,
         projectId: params.projectId,
         taskTitle: params.taskTitle,
-        startedAt: timeStr,
-        completedAt: new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        startedAt,
+        completedAt: nowAr(),
         logs,
-        filesInspected,
-        summary: `تم الفحص التقني الكامل عبر محرك OpenHands: اتصالات WebRTC اللحظية مستقرة بنسبة 100% بزمن استجابة 36.4ms، واجتياز 12 نمط تحدي بدون أي أخطاء وبتكلفة استضافة صفرية $0.00.`,
+        filesInspected: [],
+        summary: status === 'NOT_CONFIGURED'
+          ? 'OPENHANDS: NOT_CONFIGURED — لا يوجد تنفيذ تقني حقيقي حتى يتم ربط خدمة OpenHands فعلية.'
+          : 'OPENHANDS: ERROR — فشل الاتصال بمحرك التنفيذ، ولم يتم ادعاء أي نتيجة.',
         metrics: {
-          testsPassed: 12,
+          testsPassed: 0,
           testsFailed: 0,
-          latencyMs: 36,
-          bundleSizeMb: 14.8,
-          zeroCostVerified: true
-        }
+          zeroCostVerified: false,
+        },
       };
+    }
 
-    } else if (params.projectId === 'mueen') {
-      // Mueen technical sandbox execution
-      filesInspected.push('src/mueen/quran/surahs-meta.json', 'src/mueen/fonts/uthmanic-kingfahd.woff2', 'src/mueen/audio/reciter-sync.ts', 'src/mueen/offline/cacheStorage.ts');
-
-      logs.push({
-        id: `${sessionId}-1`,
-        timestamp: timeStr,
-        action: 'file_read',
-        targetFile: 'src/mueen/quran/surahs-meta.json',
-        observation: 'قراءة وفحص فهرس السور الـ 114: مطابقة تامة لعدد الآيات (6,236 آية) وأرقام الأجزاء وعلامات الوقف المعتمدة.',
-        exitCode: 0,
-        durationMs: 38
+    const started = performance.now();
+    try {
+      const response = await fetch('/api/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'execute_code',
+          projectId: params.projectId,
+          params: {
+            agentId: params.agentId,
+            agentName: params.agentName,
+            taskTitle: params.taskTitle,
+            objective: params.objective,
+          },
+        }),
       });
+      const result = await response.json();
+      const durationMs = Math.round(performance.now() - started);
 
-      logs.push({
-        id: `${sessionId}-2`,
-        timestamp: timeStr,
-        action: 'cmd_run',
-        command: 'node ./tools/verify-king-fahd-scripture.js --strict-diacritics',
-        observation: `[OpenHands Scripture Validator]\n> Verifying Uthmanic font glyphs (مجمع الملك فهد لطباعة المصحف الشريف)...\n> Total Ayahs analyzed: 6,236\n> Font glyph rendering fidelity: 100.0%\n> Diacritics and Tashkeel accuracy: 100%\n> Offline bundle size: 22.1 MB (ضمن الحد الأقصى 25MB)\n> Zero Cost verification: PASSED ($0.00)`,
-        exitCode: 0,
-        durationMs: 210
-      });
+      if (!response.ok || !result?.ok) {
+        const message = result?.error || `OpenHands request failed with HTTP ${response.status}`;
+        return {
+          sessionId,
+          agentId: params.agentId,
+          agentName: params.agentName,
+          projectId: params.projectId,
+          taskTitle: params.taskTitle,
+          startedAt,
+          completedAt: nowAr(),
+          logs: [{
+            id: `${sessionId}-error`,
+            timestamp: nowAr(),
+            action: 'cmd_run',
+            observation: message,
+            exitCode: 1,
+            durationMs,
+            isError: true,
+          }],
+          filesInspected: [],
+          summary: `OpenHands لم يؤكد نجاح التنفيذ: ${message}`,
+          metrics: {
+            testsPassed: 0,
+            testsFailed: 0,
+            zeroCostVerified: false,
+          },
+        };
+      }
 
-      logs.push({
-        id: `${sessionId}-3`,
-        timestamp: timeStr,
-        action: 'test_run',
-        command: 'node ./tests/audio-timestamp-sync.js --reciter=al-minshawi --surah=1-10',
-        observation: `[OpenHands Audio Sync Engine]\n> Testing word-by-word highlight synchronization...\n> Max audio drift: ±8ms (ممتاز، التزامن لحظي ومريح للعين)\n> IndexedDB cache retrieval latency: 4.1ms\n> Airplane mode simulator: PASSED (100% Offline Functional)`,
-        exitCode: 0,
-        durationMs: 195
-      });
+      const output = result.output;
+      const filesInspected = Array.isArray(output?.filesInspected)
+        ? output.filesInspected
+        : Array.isArray(output?.files)
+          ? output.files
+          : [];
+      const testsPassed = Number(output?.metrics?.testsPassed ?? output?.testsPassed ?? 0) || 0;
+      const testsFailed = Number(output?.metrics?.testsFailed ?? output?.testsFailed ?? 0) || 0;
 
       return {
         sessionId,
@@ -126,62 +139,53 @@ export class OpenHandsEngine {
         agentName: params.agentName,
         projectId: params.projectId,
         taskTitle: params.taskTitle,
-        startedAt: timeStr,
-        completedAt: new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        logs,
+        startedAt,
+        completedAt: nowAr(),
+        logs: [{
+          id: `${sessionId}-result`,
+          timestamp: nowAr(),
+          action: 'cmd_run',
+          observation: stringifyResult(output),
+          exitCode: 0,
+          durationMs,
+        }],
         filesInspected,
-        summary: `تم التدقيق البرمجي الشامل عبر OpenHands: مطابقة 114 سورة لرسم مجمع الملك فهد بالكامل، ومزامنة التلاوة الصوتية بدقة ±8ms، وتأكيد العمل في وضع الطيران بدون إنترنت بحجم 22.1MB فقط.`,
+        summary: output?.summary || 'تم التنفيذ عبر خدمة OpenHands المتصلة فعلياً، وتم استلام نتيجة من الخادم.',
         metrics: {
-          testsPassed: 24,
-          testsFailed: 0,
-          latencyMs: 8,
-          bundleSizeMb: 22.1,
-          zeroCostVerified: true
-        }
+          testsPassed,
+          testsFailed,
+          latencyMs: Number(output?.metrics?.latencyMs ?? output?.latencyMs) || undefined,
+          bundleSizeMb: Number(output?.metrics?.bundleSizeMb ?? output?.bundleSizeMb) || undefined,
+          zeroCostVerified: Boolean(output?.metrics?.zeroCostVerified ?? output?.zeroCostVerified ?? false),
+        },
       };
-
-    } else {
-      // General / HQ technical sandbox execution
-      filesInspected.push('src/context/CompanyContext.tsx', 'src/components/office/InteractiveOffice.tsx', 'src/index.css');
-
-      logs.push({
-        id: `${sessionId}-1`,
-        timestamp: timeStr,
-        action: 'cmd_run',
-        command: 'npm run lint && tsc --noEmit',
-        observation: `[OpenHands Linter & Compiler]\n> tsc --noEmit\n> TypeScript build passed with 0 errors.\n> ESLint static analysis: 0 warnings.\n> Zero-Cost policy check: 0 paid dependencies found.`,
-        exitCode: 0,
-        durationMs: 150
-      });
-
-      logs.push({
-        id: `${sessionId}-2`,
-        timestamp: timeStr,
-        action: 'test_run',
-        command: 'node ./tests/benchmarks/state-reactivity.js',
-        observation: `[OpenHands State Benchmark]\n> State transition latency: 1.2ms\n> Memory footprint: 18.4 MB\n> Three.js scene render loop: 60 FPS stable\n> Result: All benchmarks passed.`,
-        exitCode: 0,
-        durationMs: 140
-      });
-
+    } catch (error: any) {
+      const durationMs = Math.round(performance.now() - started);
+      const message = error?.message || 'Unknown OpenHands connection error';
       return {
         sessionId,
         agentId: params.agentId,
         agentName: params.agentName,
         projectId: params.projectId,
         taskTitle: params.taskTitle,
-        startedAt: timeStr,
-        completedAt: new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        logs,
-        filesInspected,
-        summary: `تم تنفيذ التحقق التقني عبر OpenHands: نجاح فحص TypeScript وESLint بصفر أخطاء، واستقرار أداء المنظومة بمعدل 60 إطاراً في الثانية دون أي تكاليف تشغيلية.`,
+        startedAt,
+        completedAt: nowAr(),
+        logs: [{
+          id: `${sessionId}-exception`,
+          timestamp: nowAr(),
+          action: 'cmd_run',
+          observation: message,
+          exitCode: 1,
+          durationMs,
+          isError: true,
+        }],
+        filesInspected: [],
+        summary: `فشل الاتصال الحقيقي بـ OpenHands: ${message}`,
         metrics: {
-          testsPassed: 10,
+          testsPassed: 0,
           testsFailed: 0,
-          latencyMs: 1,
-          bundleSizeMb: 18.4,
-          zeroCostVerified: true
-        }
+          zeroCostVerified: false,
+        },
       };
     }
   }
