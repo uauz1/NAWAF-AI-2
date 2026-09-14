@@ -8,6 +8,11 @@ export interface DialogueContext {
   activePlan?: ExecutionPlan;
   userQuery: string;
   isCompanyOperating: boolean;
+  companyState?: {
+    activePlansCount: number;
+    pendingApprovalsCount: number;
+    totalEmployees: number;
+  };
   onTriggerApproval?: (params: { title: string; description: string; projectId: string }) => Decision | void;
 }
 
@@ -22,19 +27,19 @@ export async function generateCrewAgentResponseAsync(context: DialogueContext): 
     taskContext: {
       currentTask: employee.currentTask,
       taskProgress: employee.taskProgress || 0,
-      planSteps: activePlan?.steps
+      planSteps: activePlan?.steps,
     },
     companyState: {
       isOperating: isCompanyOperating,
-      activePlansCount: activePlan ? 1 : 0,
-      pendingApprovalsCount: 0,
-      totalEmployees: 6
+      activePlansCount: context.companyState?.activePlansCount ?? (activePlan ? 1 : 0),
+      pendingApprovalsCount: context.companyState?.pendingApprovalsCount ?? 0,
+      totalEmployees: context.companyState?.totalEmployees ?? 0,
     },
     availableTools: employee.tools || [],
     toolResults: [],
     previousRelevantResults: employee.lastResult ? [employee.lastResult] : [],
-    onTriggerApproval
+    onTriggerApproval,
   };
 
-  return await processEmployeeMessage(userQuery, chatContext);
+  return processEmployeeMessage(userQuery, chatContext);
 }
