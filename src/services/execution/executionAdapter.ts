@@ -20,9 +20,10 @@ export interface SystemEngineStatus {
     endpoint: string | null;
   };
   localBackend: {
-    status: 'CONNECTED';
+    status: ExecutionEngineStatus;
     nodeVersion?: string;
     timestamp?: string;
+    workspaceRoot?: string;
   };
 }
 
@@ -46,16 +47,16 @@ export class ExecutionAdapter {
           executionEngine: 'ERROR',
           crewai: { status: 'ERROR', endpoint: null },
           openhands: { status: 'ERROR', endpoint: null },
-          localBackend: { status: 'CONNECTED' }
+          localBackend: { status: 'ERROR' },
         };
       }
       return await res.json();
     } catch {
       return {
-        executionEngine: 'NOT_CONFIGURED',
-        crewai: { status: 'NOT_CONFIGURED', endpoint: null },
-        openhands: { status: 'NOT_CONFIGURED', endpoint: null },
-        localBackend: { status: 'CONNECTED' }
+        executionEngine: 'ERROR',
+        crewai: { status: 'ERROR', endpoint: null },
+        openhands: { status: 'ERROR', endpoint: null },
+        localBackend: { status: 'ERROR' },
       };
     }
   }
@@ -66,7 +67,7 @@ export class ExecutionAdapter {
       const res = await fetch('/api/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, params, projectId })
+        body: JSON.stringify({ action, params, projectId }),
       });
 
       const data = await res.json();
@@ -78,7 +79,7 @@ export class ExecutionAdapter {
         startedAt,
         finishedAt: new Date().toISOString(),
         output: null,
-        error: err.message || 'فشل الاتصال بالواجهة الخلفية (Backend Connection Error)'
+        error: err?.message || 'فشل الاتصال بالواجهة الخلفية (Backend Connection Error)',
       };
     }
   }
