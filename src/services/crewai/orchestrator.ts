@@ -12,7 +12,7 @@ export class CrewOrchestrator {
   private state: CrewOrchestratorState = {
     status: 'NOT_CONFIGURED',
     endpoint: null,
-    lastChecked: new Date().toISOString()
+    lastChecked: new Date().toISOString(),
   };
 
   private constructor() {}
@@ -27,27 +27,34 @@ export class CrewOrchestrator {
   public async checkStatus(): Promise<CrewOrchestratorState> {
     try {
       const res = await fetch('/api/orchestrator/status');
-      if (res.ok) {
-        const data = await res.json();
-        this.state = {
-          status: data.crewai?.status || 'NOT_CONFIGURED',
-          endpoint: data.crewai?.endpoint || null,
-          lastChecked: new Date().toISOString()
-        };
-      } else {
+      if (!res.ok) {
         this.state = {
           status: 'UNAVAILABLE',
           endpoint: null,
           lastChecked: new Date().toISOString(),
-          error: `Server responded with status ${res.status}`
+          error: `Server responded with status ${res.status}`,
         };
+        return this.state;
       }
-    } catch (err: any) {
+
+      const data = await res.json();
+      const backendStatus = data.crewai?.status;
+      this.state = {
+        status: backendStatus === 'CONNECTED'
+          ? 'CONNECTED'
+          : backendStatus === 'NOT_CONFIGURED'
+            ? 'NOT_CONFIGURED'
+            : 'UNAVAILABLE',
+        endpoint: data.crewai?.endpoint || null,
+        lastChecked: new Date().toISOString(),
+        error: backendStatus === 'ERROR' ? 'CrewAI health check failed.' : undefined,
+      };
+    } catch (error: any) {
       this.state = {
         status: 'UNAVAILABLE',
         endpoint: null,
         lastChecked: new Date().toISOString(),
-        error: err.message || 'Failed to check orchestrator status'
+        error: error?.message || 'Failed to check orchestrator status',
       };
     }
     return this.state;
@@ -57,28 +64,42 @@ export class CrewOrchestrator {
     return this.state;
   }
 
-  public async runWorkflow(workflowId: string, payload: any): Promise<{ success: boolean; status: OrchestratorStatus; error?: string; result?: any }> {
-    if (this.state.status !== 'CONNECTED') {
+  public async runWorkflow(
+    workflowId: string,
+    payload: any,
+  ): Promise<{ success: boolean; status: OrchestratorStatus; error?: string; result?: any }> {
+    const current = await this.checkStatus();
+    if (current.status !== 'CONNECTED') {
       return {
         success: false,
-        status: this.state.status,
-        error: 'محرك CrewAI غير متصل حالياً (NOT_CONFIGURED). لا يمكن بدء سير عمل التنسيق الآلي بدون خادم CrewAI متصل.'
+        status: current.status,
+        error: current.status === 'NOT_CONFIGURED'
+          ? 'CREWAI: NOT_CONFIGURED — لا يوجد خادم CrewAI حقيقي متصل.'
+          : `CREWAI: UNAVAILABLE — ${current.error || 'تعذر الوصول إلى خدمة CrewAI.'}`,
       };
     }
 
     try {
-      const res = await fetch(`${this.state.endpoint}/api/crew/run`, {
+      const res = await fetch('/api/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workflowId, payload })
+        body: JSON.stringify({
+          action: 'orchestrate',
+          params: { workflowId, payload },
+        }),
       });
       const data = await res.json();
-      return { success: res.ok, status: 'CONNECTED', result: data };
-    } catch (err: any) {
+      return {
+        success: Boolean(res.ok && data?.ok),
+        status: 'CONNECTED',
+        result: data?.output,
+        error: data?.ok ? undefined : (data?.error || 'CrewAI execution failed.'),
+      };
+    } catch (error: any) {
       return {
         success: false,
         status: 'UNAVAILABLE',
-        error: `خطأ في الاتصال بخادم CrewAI: ${err.message}`
+        error: `خطأ في الاتصال بخادم CrewAI: ${error?.message || 'unknown error'}`,
       };
     }
   }
