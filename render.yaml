@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: nawaf-hq-agent-runtime
+    runtime: docker
+    plan: free
+    dockerfilePath: ./runtime/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: RUNTIME_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini/gemini-2.5-flash
+      - key: OPENHANDS_API_URL
+        sync: false
