@@ -1,7 +1,6 @@
 import { OpenHandsAdapter } from '../openhands/adapter';
-import { CrewOrchestrator } from '../crewai/orchestrator';
 
-export type ToolName = 
+export type ToolName =
   | 'inspect_repository'
   | 'read_file'
   | 'run_linter'
@@ -33,121 +32,80 @@ export interface ToolExecutionResponse {
 
 export class ToolRouter {
   private static instance: ToolRouter;
-
   private constructor() {}
 
   public static getInstance(): ToolRouter {
-    if (!ToolRouter.instance) {
-      ToolRouter.instance = new ToolRouter();
-    }
+    if (!ToolRouter.instance) ToolRouter.instance = new ToolRouter();
     return ToolRouter.instance;
   }
 
   public async route(request: ToolExecutionRequest): Promise<ToolExecutionResponse> {
-    const startTime = Date.now();
-    const timestamp = new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const started = Date.now();
+    const timestamp = new Date().toLocaleTimeString('ar-SA', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+    const adapter = OpenHandsAdapter.getInstance();
 
     try {
-      if (request.tool === 'inspect_repository') {
-        const adapter = OpenHandsAdapter.getInstance();
-        const res = await adapter.inspectRepository();
-        return {
-          success: res.success,
-          tool: request.tool,
-          timestamp,
-          durationMs: Date.now() - startTime,
-          data: res,
-          error: res.error,
-          isReal: true
-        };
-      }
-
-      if (request.tool === 'read_file') {
-        const filePath = request.params?.filePath;
-        if (!filePath) {
+      let res: any;
+      switch (request.tool) {
+        case 'inspect_repository':
+          res = await adapter.inspectRepository();
+          break;
+        case 'read_file':
+          if (!request.params?.filePath) {
+            return { success: false, tool: request.tool, timestamp, durationMs: Date.now() - started, error: 'لم يتم تحديد مسار الملف.', isReal: true };
+          }
+          res = await adapter.readFile(request.params.filePath);
+          break;
+        case 'run_linter':
+          res = await adapter.runLinter();
+          break;
+        case 'run_tests':
+          res = await adapter.runTests();
+          break;
+        case 'modify_file':
+          res = await adapter.modifyFile(request.params?.filePath || '', request.params?.content || '');
+          break;
+        case 'run_command':
+          res = await adapter.runCommand(request.params?.command || '');
+          break;
+        case 'request_ceo_approval':
           return {
-            success: false,
+            success: true,
             tool: request.tool,
             timestamp,
-            durationMs: Date.now() - startTime,
-            error: 'لم يتم تحديد مسار الملف المطلوب قراءته.',
-            isReal: true
+            durationMs: Date.now() - started,
+            data: {
+              title: request.params?.title,
+              description: request.params?.description,
+              projectId: request.projectId,
+              requestedBy: request.requestedBy.agentName,
+              status: 'waiting',
+            },
+            isReal: true,
           };
-        }
-        const adapter = OpenHandsAdapter.getInstance();
-        const res = await adapter.readFile(filePath);
-        return {
-          success: res.success,
-          tool: request.tool,
-          timestamp,
-          durationMs: Date.now() - startTime,
-          data: res,
-          error: res.error,
-          isReal: true
-        };
-      }
-
-      if (request.tool === 'run_linter' || request.tool === 'run_tests') {
-        const adapter = OpenHandsAdapter.getInstance();
-        const res = await adapter.runLinter();
-        return {
-          success: res.success,
-          tool: request.tool,
-          timestamp,
-          durationMs: Date.now() - startTime,
-          data: res,
-          error: res.error,
-          isReal: true
-        };
-      }
-
-      if (request.tool === 'modify_file' || request.tool === 'run_command') {
-        const adapter = OpenHandsAdapter.getInstance();
-        const res = await adapter.modifyFile(request.params?.filePath || '', request.params?.content || '');
-        return {
-          success: false,
-          tool: request.tool,
-          timestamp,
-          durationMs: Date.now() - startTime,
-          error: res.error || 'التنفيذ البرمجي وتعديل الأكواد غير متصل حاليًا (محرك OpenHands: NOT_CONFIGURED).',
-          isReal: true
-        };
-      }
-
-      if (request.tool === 'request_ceo_approval') {
-        return {
-          success: true,
-          tool: request.tool,
-          timestamp,
-          durationMs: Date.now() - startTime,
-          data: {
-            title: request.params?.title,
-            description: request.params?.description,
-            projectId: request.projectId,
-            requestedBy: request.requestedBy.agentName,
-            status: 'waiting'
-          },
-          isReal: true
-        };
+        default:
+          return { success: false, tool: request.tool, timestamp, durationMs: Date.now() - started, error: `الأداة ${request.tool} غير مدعومة.`, isReal: true };
       }
 
       return {
-        success: false,
+        success: Boolean(res?.success),
         tool: request.tool,
         timestamp,
-        durationMs: Date.now() - startTime,
-        error: `الأداة ${request.tool} غير مدعومة في نظام التوجيه الحالي.`,
-        isReal: true
+        durationMs: Date.now() - started,
+        data: res?.data ?? res,
+        error: res?.error,
+        isReal: true,
       };
-
-    } catch (err: any) {
+    } catch (error: any) {
       return {
         success: false,
         tool: request.tool,
         timestamp,
-        durationMs: Date.now() - startTime,
-        error: err.message || 'خطأ غير متوقع في محرك الأدوات',
-        isReal: true
+        durationMs: Date.now() - started,
+        error: error?.message || 'خطأ غير متوقع في محرك الأدوات',
+        isReal: true,
       };
     }
   }
