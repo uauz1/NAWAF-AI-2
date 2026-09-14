@@ -7,6 +7,19 @@ export interface OpenHandsAdapterState {
   error?: string;
 }
 
+export interface RealExecutionLog {
+  id: string;
+  timestamp: string;
+  tool: string;
+  action: string;
+  command?: string;
+  targetFile?: string;
+  durationMs: number;
+  exitCode: number;
+  output: string;
+  isReal: true;
+}
+
 export class OpenHandsAdapter {
   private static instance: OpenHandsAdapter;
   private state: OpenHandsAdapterState = {
