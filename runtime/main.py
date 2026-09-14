@@ -13,10 +13,8 @@ except Exception as exc:
     CREWAI_IMPORT_OK = False
     CREWAI_IMPORT_ERROR = str(exc)
 
-app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.0.0')
+app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.1.0')
 
-RUNTIME_API_KEY = os.getenv('RUNTIME_API_KEY', '').strip()
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini/gemini-2.5-flash').strip()
 OPENHANDS_API_URL = os.getenv('OPENHANDS_API_URL', '').strip().rstrip('/')
 
@@ -31,20 +29,12 @@ class ExecuteRequest(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
-def require_auth(authorization: Optional[str]) -> None:
-    if not RUNTIME_API_KEY:
-        raise HTTPException(status_code=503, detail='RUNTIME_API_KEY is not configured')
-    expected = f'Bearer {RUNTIME_API_KEY}'
-    if authorization != expected:
-        raise HTTPException(status_code=401, detail='Unauthorized')
-
-
-def crew_status() -> Dict[str, Any]:
+def crew_status(api_key: str = '') -> Dict[str, Any]:
     if not CREWAI_IMPORT_OK:
         return {'status': 'ERROR', 'error': CREWAI_IMPORT_ERROR}
-    if not GEMINI_API_KEY:
-        return {'status': 'NOT_CONFIGURED', 'error': 'GEMINI_API_KEY is missing'}
-    return {'status': 'CONNECTED', 'model': GEMINI_MODEL}
+    if not api_key:
+        return {'status': 'READY', 'auth': 'per-request', 'model': GEMINI_MODEL}
+    return {'status': 'CONNECTED', 'auth': 'per-request', 'model': GEMINI_MODEL}
 
 
 async def openhands_status() -> Dict[str, Any]:
@@ -62,7 +52,7 @@ async def openhands_status() -> Dict[str, Any]:
 @app.get('/health')
 async def health() -> Dict[str, Any]:
     return {
-        'ok': True,
+        'ok': CREWAI_IMPORT_OK,
         'service': 'nawaf-hq-agent-runtime',
         'crewai': crew_status(),
         'openhands': await openhands_status(),
@@ -71,15 +61,14 @@ async def health() -> Dict[str, Any]:
 
 
 @app.get('/status')
-async def status(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-    require_auth(authorization)
+async def status() -> Dict[str, Any]:
     return {
         'crewai': crew_status(),
         'openhands': await openhands_status(),
     }
 
 
-def make_crew(params: Dict[str, Any]) -> Crew:
+def make_crew(params: Dict[str, Any], api_key: str) -> Crew:
     goal = str(params.get('goal') or params.get('instruction') or params.get('objective') or '').strip()
     if not goal:
         raise ValueError('A goal/instruction is required')
@@ -89,7 +78,7 @@ def make_crew(params: Dict[str, Any]) -> Crew:
     project = params.get('project') or {}
     available_tools: List[str] = list(params.get('availableTools') or [])
 
-    llm = LLM(model=GEMINI_MODEL, api_key=GEMINI_API_KEY, temperature=0.2)
+    llm = LLM(model=GEMINI_MODEL, api_key=api_key, temperature=0.2)
 
     coordinator = Agent(
         role='NAWAF HQ Operations Coordinator',
@@ -143,15 +132,17 @@ def make_crew(params: Dict[str, Any]) -> Crew:
 
 
 @app.post('/api/orchestrate')
-async def orchestrate(payload: OrchestrateRequest, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-    require_auth(authorization)
-    state = crew_status()
+async def orchestrate(payload: OrchestrateRequest, x_gemini_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    api_key = (x_gemini_key or '').strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail='X-Gemini-Key is required for real CrewAI execution')
+    state = crew_status(api_key)
     if state['status'] != 'CONNECTED':
         return {'ok': False, 'status': state['status'], 'error': state.get('error'), 'output': None}
 
     started = time.time()
     try:
-        crew = make_crew(payload.params)
+        crew = make_crew(payload.params, api_key)
         result = crew.kickoff()
         raw = getattr(result, 'raw', None) or str(result)
         return {
@@ -173,8 +164,7 @@ async def orchestrate(payload: OrchestrateRequest, authorization: Optional[str] 
 
 
 @app.post('/api/execute')
-async def execute(payload: ExecuteRequest, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-    require_auth(authorization)
+async def execute(payload: ExecuteRequest) -> Dict[str, Any]:
     if not OPENHANDS_API_URL:
         return {
             'ok': False,
