@@ -1,183 +1,249 @@
-import express from "express";
-import path from "path";
-import fs from "fs";
-import { exec } from "child_process";
-import { promisify } from "util";
-import { createServer as createViteServer } from "vite";
+import express from 'express';
+import path from 'path';
+import fs from 'fs';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { createServer as createViteServer } from 'vite';
 
 const execAsync = promisify(exec);
 
+type EngineStatus = 'CONNECTED' | 'NOT_CONFIGURED' | 'ERROR';
+
+const workspaceRoot = process.cwd();
+
+async function pingEngine(url?: string | null): Promise<EngineStatus> {
+  if (!url) return 'NOT_CONFIGURED';
+  try {
+    const response = await fetch(`${url.replace(/\/$/, '')}/health`, {
+      signal: AbortSignal.timeout(2500),
+    });
+    return response.ok ? 'CONNECTED' : 'ERROR';
+  } catch {
+    return 'ERROR';
+  }
+}
+
+async function readPackageJson() {
+  const raw = await fs.promises.readFile(path.join(workspaceRoot, 'package.json'), 'utf8');
+  return JSON.parse(raw);
+}
+
+async function scanWorkspace(maxFiles = 120) {
+  const ignored = new Set(['node_modules', 'dist', '.git', '.next', '.cache', 'coverage']);
+  const files: string[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    if (files.length >= maxFiles) return;
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (files.length >= maxFiles) break;
+      if (ignored.has(entry.name)) continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else {
+        files.push(path.relative(workspaceRoot, fullPath));
+      }
+    }
+  }
+
+  await walk(workspaceRoot);
+  return files;
+}
+
+function safeWorkspacePath(relativePath: string) {
+  const resolved = path.resolve(workspaceRoot, relativePath);
+  const rootWithSep = workspaceRoot.endsWith(path.sep) ? workspaceRoot : `${workspaceRoot}${path.sep}`;
+  if (resolved !== workspaceRoot && !resolved.startsWith(rootWithSep)) {
+    throw new Error('Access denied: path is outside the workspace');
+  }
+  return resolved;
+}
+
+async function engineSnapshot() {
+  const crewaiUrl = process.env.CREWAI_API_URL || null;
+  const openhandsUrl = process.env.OPENHANDS_API_URL || null;
+  const [crewaiStatus, openhandsStatus] = await Promise.all([
+    pingEngine(crewaiUrl),
+    pingEngine(openhandsUrl),
+  ]);
+
+  return {
+    executionEngine: openhandsStatus,
+    crewai: { status: crewaiStatus, endpoint: crewaiUrl },
+    openhands: { status: openhandsStatus, endpoint: openhandsUrl },
+    localBackend: {
+      status: 'CONNECTED' as const,
+      nodeVersion: process.version,
+      workspaceRoot,
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
 
-  app.use(express.json());
+  app.use(express.json({ limit: '1mb' }));
 
-  // Health check
-  app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // Engine status check with real ping check
-  app.get("/api/engine/status", async (_req, res) => {
-    const crewaiUrl = process.env.CREWAI_API_URL || null;
-    const openhandsUrl = process.env.OPENHANDS_API_URL || null;
+  app.get('/api/engine/status', async (_req, res) => {
+    res.json(await engineSnapshot());
+  });
 
-    let crewaiStatus: "CONNECTED" | "NOT_CONFIGURED" | "ERROR" = "NOT_CONFIGURED";
-    if (crewaiUrl) {
-      try {
-        const cRes = await fetch(`${crewaiUrl}/health`, { signal: AbortSignal.timeout(2000) });
-        crewaiStatus = cRes.ok ? "CONNECTED" : "ERROR";
-      } catch {
-        crewaiStatus = "ERROR";
-      }
-    }
-
-    let openhandsStatus: "CONNECTED" | "NOT_CONFIGURED" | "ERROR" = "NOT_CONFIGURED";
-    if (openhandsUrl) {
-      try {
-        const oRes = await fetch(`${openhandsUrl}/health`, { signal: AbortSignal.timeout(2000) });
-        openhandsStatus = oRes.ok ? "CONNECTED" : "ERROR";
-      } catch {
-        openhandsStatus = "ERROR";
-      }
-    }
+  app.get('/api/orchestrator/status', async (_req, res) => {
+    const snapshot = await engineSnapshot();
+    const pkg = await readPackageJson().catch(() => ({ scripts: {} }));
+    const scripts = pkg.scripts || {};
 
     res.json({
-      executionEngine: openhandsStatus,
       crewai: {
-        status: crewaiStatus,
-        endpoint: crewaiUrl
+        ...snapshot.crewai,
+        type: 'orchestrator',
+        capabilities: snapshot.crewai.status === 'CONNECTED'
+          ? ['delegation', 'task_planning', 'multi_agent_execution']
+          : [],
       },
       openhands: {
-        status: openhandsStatus,
-        endpoint: openhandsUrl
+        ...snapshot.openhands,
+        type: 'code_executor',
+        capabilities: snapshot.openhands.status === 'CONNECTED'
+          ? ['modify_file', 'run_command', 'sandbox_execution']
+          : [],
       },
-      localBackend: {
-        status: "CONNECTED",
-        nodeVersion: process.version,
-        timestamp: new Date().toISOString()
-      }
+      localExecution: {
+        status: 'CONNECTED',
+        type: 'workspace_backend',
+        capabilities: [
+          'inspect_repository',
+          'read_file',
+          ...(scripts.lint ? ['run_linter'] : []),
+          ...(scripts.test ? ['run_tests'] : []),
+        ],
+      },
     });
   });
 
-  // Real backend execution endpoint: POST /api/execute
-  app.post("/api/execute", async (req, res) => {
+  app.post('/api/execute', async (req, res) => {
     const startedAt = new Date().toISOString();
-    const { action, params, projectId } = req.body;
+    const { action, params } = req.body || {};
 
-    if (!action) {
+    if (!action || typeof action !== 'string') {
       return res.status(400).json({
         ok: false,
-        action: "unknown",
+        action: 'unknown',
         startedAt,
         finishedAt: new Date().toISOString(),
         output: null,
-        error: "Action parameter is required."
+        error: 'Action parameter is required.',
       });
     }
 
     try {
-      if (action === "inspect_project_state" || action === "inspect_repository") {
-        const cwd = process.cwd();
-        const pkgRaw = await fs.promises.readFile(path.join(cwd, "package.json"), "utf8");
-        const pkg = JSON.parse(pkgRaw);
-        const files = await fs.promises.readdir(cwd);
-
-        const targetProjId = projectId || (params && params.projectId) || "qaddha";
-
-        let projectName = "قدّها";
-        let health = "مستقر";
-        let description = "منصة ألعاب التجمعات والحماس الاجتماعي الأكثر انتشاراً في الخليج";
-        let tasks = [
-          { title: "تطوير غرف اللعب المباشر P2P عبر متصفح الويب", status: "completed" },
-          { title: "إعداد 12 نمط تحدي عائلي وشبابي جديد", status: "in_progress" },
-          { title: "تحسين سرعة تحميل اللعبة بدون تطبيق", status: "in_progress" },
-          { title: "تدقيق نصوص الأسئلة والتأكد من ملاءمتها", status: "completed" }
-        ];
-
-        if (targetProjId === "mueen") {
-          projectName = "مُعِين";
-          health = "ممتاز";
-          description = "منصة إسلامية تقدم الأذكار، المصحف، متابعة الورد القرآني، ومواقيت الصلاة";
-          tasks = [
-            { title: "تدقيق نصوص التفسير الميسر", status: "needs_ceo" },
-            { title: "تحسين أداء عرض خطوط القرآن الكريم", status: "in_progress" },
-            { title: "تصميم شاشات إحصائيات الختمة الشهرية", status: "completed" },
-            { title: "اختبار دقة توقيت الإمساك والفجر", status: "in_progress" }
-          ];
-        }
-
-        const completedTasks = tasks.filter(t => t.status === "completed").length;
-        const inProgressTasks = tasks.filter(t => t.status === "in_progress").length;
-        const calculatedProgress = Math.round((completedTasks / tasks.length) * 100);
-        const finishedAt = new Date().toISOString();
-
+      if (action === 'inspect_project_state' || action === 'inspect_repository') {
+        const pkg = await readPackageJson();
+        const files = await scanWorkspace();
         return res.json({
           ok: true,
           action,
           startedAt,
-          finishedAt,
+          finishedAt: new Date().toISOString(),
           output: {
-            projectId: targetProjId,
-            projectName,
-            health,
-            description,
-            totalTasks: tasks.length,
-            completedTasks,
-            inProgressTasks,
-            tasks,
-            calculatedProgress,
-            cost: "$0.00",
-            workspaceRoot: cwd,
-            packageVersion: pkg.version || "1.0.0",
-            totalRootEntries: files.length,
-            verifiedOnDisk: true
+            source: 'workspace',
+            verifiedOnDisk: true,
+            workspaceRoot,
+            packageName: pkg.name || null,
+            packageVersion: pkg.version || null,
+            scripts: Object.keys(pkg.scripts || {}),
+            dependencies: Object.keys(pkg.dependencies || {}),
+            totalFilesScanned: files.length,
+            files,
+            note: 'This response contains only facts read from the current NAWAF-AI-2 workspace. It does not invent project tasks, progress, health, or milestones.',
           },
-          error: null
+          error: null,
         });
       }
 
-      if (action === "modify_code" || action === "execute_code" || action === "run_command" || action === "modify_file") {
-        const finishedAt = new Date().toISOString();
-        const openhandsUrl = process.env.OPENHANDS_API_URL;
+      if (action === 'orchestrate' || action === 'create_plan') {
+        const crewaiUrl = process.env.CREWAI_API_URL;
+        if (!crewaiUrl) {
+          return res.json({
+            ok: false,
+            action,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            output: null,
+            error: 'CREWAI: NOT_CONFIGURED. CREWAI_API_URL is not configured.',
+          });
+        }
+        if (await pingEngine(crewaiUrl) !== 'CONNECTED') {
+          return res.status(502).json({
+            ok: false,
+            action,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            output: null,
+            error: 'CREWAI: ERROR. The configured service did not pass its health check.',
+          });
+        }
+        const response = await fetch(`${crewaiUrl.replace(/\/$/, '')}/api/orchestrate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, params }),
+          signal: AbortSignal.timeout(120000),
+        });
+        const data = await response.json();
+        return res.status(response.ok ? 200 : 502).json({
+          ok: response.ok,
+          action,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          output: response.ok ? data : null,
+          error: response.ok ? null : (data?.error || 'CrewAI execution failed.'),
+        });
+      }
 
+      if (['modify_code', 'execute_code', 'run_command', 'modify_file'].includes(action)) {
+        const openhandsUrl = process.env.OPENHANDS_API_URL;
         if (!openhandsUrl) {
           return res.json({
             ok: false,
             action,
             startedAt,
-            finishedAt,
+            finishedAt: new Date().toISOString(),
             output: null,
-            error: "EXECUTION ENGINE: NOT CONFIGURED. لا يوجد محرك تنفيذ برمجي خارجي متصل (OPENHANDS_API_URL غير مهيأ)."
+            error: 'OPENHANDS: NOT_CONFIGURED. OPENHANDS_API_URL is not configured.',
           });
         }
-
-        try {
-          const resp = await fetch(`${openhandsUrl}/api/execute`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action, params })
-          });
-          const data = await resp.json();
-          return res.json({
-            ok: resp.ok,
-            action,
-            startedAt,
-            finishedAt: new Date().toISOString(),
-            output: data,
-            error: resp.ok ? null : (data.error || "Execution failed on remote engine")
-          });
-        } catch (fErr: any) {
-          return res.json({
+        if (await pingEngine(openhandsUrl) !== 'CONNECTED') {
+          return res.status(502).json({
             ok: false,
             action,
             startedAt,
             finishedAt: new Date().toISOString(),
             output: null,
-            error: `EXECUTION ENGINE: ERROR. فشل الاتصال بخادم التنفيذ: ${fErr.message}`
+            error: 'OPENHANDS: ERROR. The configured service did not pass its health check.',
           });
         }
+        const response = await fetch(`${openhandsUrl.replace(/\/$/, '')}/api/execute`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, params }),
+          signal: AbortSignal.timeout(120000),
+        });
+        const data = await response.json();
+        return res.status(response.ok ? 200 : 502).json({
+          ok: response.ok,
+          action,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          output: response.ok ? data : null,
+          error: response.ok ? null : (data?.error || 'OpenHands execution failed.'),
+        });
       }
 
       return res.status(400).json({
@@ -186,234 +252,163 @@ async function startServer() {
         startedAt,
         finishedAt: new Date().toISOString(),
         output: null,
-        error: `Action "${action}" is not supported by the backend execution engine.`
+        error: `Action "${action}" is not supported.`,
       });
-
-    } catch (err: any) {
+    } catch (error: any) {
       return res.status(500).json({
         ok: false,
         action,
         startedAt,
         finishedAt: new Date().toISOString(),
         output: null,
-        error: err.message || "Internal server error during execution"
+        error: error?.message || 'Internal execution error.',
       });
     }
   });
 
-  // Adapter status check
-  app.get("/api/orchestrator/status", (_req, res) => {
-    const crewaiUrl = process.env.CREWAI_API_URL || null;
-    const openhandsUrl = process.env.OPENHANDS_API_URL || null;
-
-    res.json({
-      crewai: {
-        status: crewaiUrl ? "CONNECTED" : "NOT_CONFIGURED",
-        endpoint: crewaiUrl,
-        type: "orchestrator",
-        capabilities: crewaiUrl ? ["delegation", "task_planning", "multi_agent_execution"] : []
-      },
-      openhands: {
-        status: openhandsUrl ? "CONNECTED" : "NOT_CONFIGURED",
-        endpoint: openhandsUrl,
-        type: "code_executor",
-        capabilities: openhandsUrl ? ["modify_file", "git_commit", "remote_sandbox_exec"] : []
-      },
-      localExecution: {
-        status: "CONNECTED",
-        type: "workspace_backend",
-        capabilities: ["inspect_repository", "read_file", "run_linter", "run_tests"]
-      }
-    });
-  });
-
-  // Real tool router endpoint
-  app.post("/api/tools/execute", async (req, res) => {
-    const { tool, params } = req.body;
-    const startTime = Date.now();
+  app.post('/api/tools/execute', async (req, res) => {
+    const { tool, params } = req.body || {};
+    const started = Date.now();
 
     try {
-      if (tool === "inspect_repository") {
-        // Scans the real project directory
-        const cwd = process.cwd();
-        const ignoreDirs = new Set(["node_modules", "dist", ".git", ".next", ".cache"]);
-        
-        async function getFiles(dir: string, fileList: string[] = [], maxFiles: number = 60): Promise<string[]> {
-          if (fileList.length >= maxFiles) return fileList;
-          const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-          for (const entry of entries) {
-            if (ignoreDirs.has(entry.name) || entry.name.startsWith(".")) continue;
-            const fullPath = path.join(dir, entry.name);
-            const relPath = path.relative(cwd, fullPath);
-            if (entry.isDirectory()) {
-              await getFiles(fullPath, fileList, maxFiles);
-            } else {
-              fileList.push(relPath);
-              if (fileList.length >= maxFiles) break;
-            }
-          }
-          return fileList;
-        }
-
-        const realFiles = await getFiles(cwd);
-        let pkgJson: any = null;
-        try {
-          const rawPkg = await fs.promises.readFile(path.join(cwd, "package.json"), "utf8");
-          const parsed = JSON.parse(rawPkg);
-          pkgJson = {
-            name: parsed.name,
-            version: parsed.version,
-            dependencies: Object.keys(parsed.dependencies || {}),
-            scripts: Object.keys(parsed.scripts || {})
-          };
-        } catch {}
-
+      if (tool === 'inspect_repository') {
+        const pkg = await readPackageJson();
+        const files = await scanWorkspace();
         return res.json({
           success: true,
-          tool: "inspect_repository",
-          durationMs: Date.now() - startTime,
+          tool,
+          durationMs: Date.now() - started,
           data: {
-            workspaceRoot: cwd,
-            totalFilesScanned: realFiles.length,
-            files: realFiles,
-            packageJson: pkgJson
-          }
+            workspaceRoot,
+            totalFilesScanned: files.length,
+            files,
+            packageJson: {
+              name: pkg.name || null,
+              version: pkg.version || null,
+              dependencies: Object.keys(pkg.dependencies || {}),
+              scripts: Object.keys(pkg.scripts || {}),
+            },
+          },
         });
       }
 
-      if (tool === "read_file") {
+      if (tool === 'read_file') {
         const filePath = params?.filePath;
-        if (!filePath || typeof filePath !== "string") {
-          return res.status(400).json({ success: false, error: "filePath parameter is required" });
+        if (!filePath || typeof filePath !== 'string') {
+          return res.status(400).json({ success: false, tool, error: 'filePath parameter is required.' });
         }
-
-        const safePath = path.resolve(process.cwd(), filePath);
-        if (!safePath.startsWith(process.cwd())) {
-          return res.status(403).json({ success: false, error: "Access denied: Path outside workspace" });
-        }
-
-        if (!fs.existsSync(safePath)) {
-          return res.status(404).json({ success: false, error: `File not found on disk: ${filePath}` });
-        }
-
-        const stat = await fs.promises.stat(safePath);
-        if (stat.isDirectory()) {
-          return res.status(400).json({ success: false, error: "Target is a directory, not a file" });
-        }
-
-        // Limit read to 32KB to avoid huge payloads
-        const content = await fs.promises.readFile(safePath, "utf8");
+        const target = safeWorkspacePath(filePath);
+        const stat = await fs.promises.stat(target).catch(() => null);
+        if (!stat) return res.status(404).json({ success: false, tool, error: `File not found: ${filePath}` });
+        if (stat.isDirectory()) return res.status(400).json({ success: false, tool, error: 'Target is a directory.' });
+        const content = await fs.promises.readFile(target, 'utf8');
         return res.json({
           success: true,
-          tool: "read_file",
-          durationMs: Date.now() - startTime,
+          tool,
+          durationMs: Date.now() - started,
           data: {
             filePath,
             sizeBytes: stat.size,
             content: content.slice(0, 32000),
-            truncated: content.length > 32000
-          }
+            truncated: content.length > 32000,
+          },
         });
       }
 
-      if (tool === "run_linter" || tool === "run_tests") {
-        const cmd = "npm run lint";
-        try {
-          const { stdout, stderr } = await execAsync(cmd, { cwd: process.cwd(), timeout: 15000 });
-          return res.json({
-            success: true,
-            tool,
-            durationMs: Date.now() - startTime,
-            data: {
-              command: cmd,
-              exitCode: 0,
-              stdout: stdout.trim(),
-              stderr: stderr.trim(),
-              status: "PASS"
-            }
-          });
-        } catch (err: any) {
+      if (tool === 'run_linter' || tool === 'run_tests') {
+        const pkg = await readPackageJson();
+        const scriptName = tool === 'run_linter' ? 'lint' : 'test';
+        if (!pkg.scripts?.[scriptName]) {
           return res.json({
             success: false,
             tool,
-            durationMs: Date.now() - startTime,
+            status: 'NOT_CONFIGURED',
+            durationMs: Date.now() - started,
+            error: `npm script "${scriptName}" is not configured in package.json.`,
+          });
+        }
+        const command = `npm run ${scriptName}`;
+        try {
+          const { stdout, stderr } = await execAsync(command, {
+            cwd: workspaceRoot,
+            timeout: 60000,
+          });
+          return res.json({
+            success: true,
+            tool,
+            durationMs: Date.now() - started,
+            data: { command, exitCode: 0, stdout: stdout.trim(), stderr: stderr.trim(), status: 'PASS' },
+          });
+        } catch (error: any) {
+          return res.json({
+            success: false,
+            tool,
+            durationMs: Date.now() - started,
             data: {
-              command: cmd,
-              exitCode: err.code || 1,
-              stdout: (err.stdout || "").trim(),
-              stderr: (err.stderr || err.message).trim(),
-              status: "FAIL"
-            }
+              command,
+              exitCode: typeof error?.code === 'number' ? error.code : 1,
+              stdout: String(error?.stdout || '').trim(),
+              stderr: String(error?.stderr || error?.message || '').trim(),
+              status: 'FAIL',
+            },
           });
         }
       }
 
-      if (tool === "modify_file" || tool === "run_command") {
-        // OpenHands is required for arbitrary code mutation and container command execution
+      if (tool === 'modify_file' || tool === 'run_command') {
         const openhandsUrl = process.env.OPENHANDS_API_URL;
         if (!openhandsUrl) {
           return res.json({
             success: false,
             tool,
-            status: "NOT_CONFIGURED",
-            error: "محرك التنفيذ البرمجي OpenHands غير متصل حاليًا (NOT_CONFIGURED). لا يمكن تعديل الأكواد أو تنفيذ أوامر في بيئة معزولة بدون توفير رابط خادم OpenHands."
+            status: 'NOT_CONFIGURED',
+            error: 'OpenHands is not connected. Configure OPENHANDS_API_URL before code mutation or arbitrary command execution.',
           });
         }
-
-        // If OPENHANDS_API_URL is configured, forward to real OpenHands API
-        try {
-          const forwardRes = await fetch(`${openhandsUrl}/api/execute`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tool, params })
-          });
-          const forwardData = await forwardRes.json();
-          return res.json({
-            success: forwardRes.ok,
-            tool,
-            data: forwardData
-          });
-        } catch (fetchErr: any) {
-          return res.status(502).json({
-            success: false,
-            tool,
-            status: "UNAVAILABLE",
-            error: `فشل الاتصال بخادم OpenHands: ${fetchErr.message}`
-          });
+        if (await pingEngine(openhandsUrl) !== 'CONNECTED') {
+          return res.status(502).json({ success: false, tool, status: 'ERROR', error: 'OpenHands health check failed.' });
         }
+        const response = await fetch(`${openhandsUrl.replace(/\/$/, '')}/api/execute`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tool, params }),
+          signal: AbortSignal.timeout(120000),
+        });
+        const data = await response.json();
+        return res.status(response.ok ? 200 : 502).json({
+          success: response.ok,
+          tool,
+          data: response.ok ? data : undefined,
+          error: response.ok ? undefined : (data?.error || 'OpenHands execution failed.'),
+        });
       }
 
-      return res.status(400).json({
-        success: false,
-        error: `Tool ${tool} is unknown or not supported by the tool router.`
-      });
-
+      return res.status(400).json({ success: false, tool, error: `Unsupported tool: ${String(tool)}` });
     } catch (error: any) {
-      return res.status(500).json({
-        success: false,
-        error: error.message || "Internal Tool Router execution error"
-      });
+      return res.status(500).json({ success: false, tool, error: error?.message || 'Tool execution failed.' });
     }
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: "spa",
+      appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = path.join(workspaceRoot, 'dist');
     app.use(express.static(distPath));
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+startServer().catch((error) => {
+  console.error('Failed to start server:', error);
+  process.exitCode = 1;
+});
