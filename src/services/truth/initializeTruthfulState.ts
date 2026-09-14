@@ -5,7 +5,7 @@ import {
 } from '../../data/initialData';
 
 const BASE = 'nawaf_hq_os_data_v1';
-const MIGRATION_KEY = 'nawaf_hq_truth_migration_v2';
+const MIGRATION_KEY = 'nawaf_hq_truth_migration_v3';
 
 function safeSet(key: string, value: unknown) {
   try {
@@ -27,8 +27,8 @@ export function initializeTruthfulState() {
   const cleanProjects = INITIAL_PROJECTS.map((project) => ({
     ...project,
     progress: 0,
-    currentPhase: 'لا يوجد تنفيذ موثق حتى الآن',
-    health: 'غير مقيم',
+    currentPhase: 'بانتظار أول تنفيذ موثق',
+    health: 'يحتاج انتباه' as const,
     bugsCount: 0,
     marketingPhase: '',
     activeIdeasCount: 0,
@@ -38,9 +38,14 @@ export function initializeTruthfulState() {
 
   const cleanEmployees = INITIAL_EMPLOYEES.map((employee) => ({
     ...employee,
-    status: 'جاهز',
+    status: 'READY' as const,
     currentTask: '',
     taskProgress: 0,
+    recentWork: [],
+    tasksCompletedCount: 0,
+    collaborationHistory: [],
+    lastResult: undefined,
+    availability: 'available',
   }));
 
   safeSet(`${BASE}_departments`, cleanDepartments);
@@ -53,6 +58,8 @@ export function initializeTruthfulState() {
   safeSet(`${BASE}_reports`, []);
   safeSet(`${BASE}_plans`, []);
   safeSet(`${BASE}_advisor_msgs`, []);
+  localStorage.removeItem(`${BASE}_meeting`);
 
+  // Force any earlier fake-state migration to be superseded once, then never repeat.
   localStorage.setItem(MIGRATION_KEY, 'done');
 }
