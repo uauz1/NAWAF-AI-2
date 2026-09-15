@@ -120,8 +120,4 @@ export class OpenHandsAdapter {
   public async modifyFile(filePath: string, content: string) {
     return this.executeTool('modify_file', { filePath, content });
   }
-
-  public async runCommand(command: string) {
-    return this.executeTool('run_command', { command });
-  }
 }
