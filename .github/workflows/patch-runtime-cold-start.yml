@@ -16,34 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Patch backend engine health retry
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          p = Path('server.ts')
-          s = p.read_text()
-          pattern = re.compile(r"async function pingEngine\(url\?: string \| null\): Promise<EngineStatus> \{.*?\n\}\n\nasync function readPackageJson", re.S)
-          replacement = """async function pingEngine(url?: string | null): Promise<EngineStatus> {
-  if (!url) return 'NOT_CONFIGURED';
-  const endpoint = `${url.replace(/\\/$/, '')}/health`;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    try {
-      const response = await fetch(endpoint, { signal: AbortSignal.timeout(15000) });
-      if (response.ok) return 'CONNECTED';
-    } catch {
-      // Free runtimes may be waking from idle; retry below.
-    }
-    if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 5000));
-  }
-  return 'ERROR';
-}
-
-async function readPackageJson"""
-          new_s, count = pattern.subn(replacement, s, count=1)
-          if count != 1:
-              raise SystemExit(f'Expected pingEngine block not found exactly once; found {count}')
-          p.write_text(new_s)
-          PY
+          python -c "from pathlib import Path; import re,base64; p=Path('server.ts'); s=p.read_text(); pattern=re.compile(r'async function pingEngine\\(url\\?: string \\| null\\): Promise<EngineStatus> \\{.*?\\n\\}\\n\\nasync function readPackageJson', re.S); repl=base64.b64decode('YXN5bmMgZnVuY3Rpb24gcGluZ0VuZ2luZSh1cmw/OiBzdHJpbmcgfCBudWxsKTogUHJvbWlzZTxFbmdpbmVTdGF0dXM+IHsKICBpZiAoIXVybCkgcmV0dXJuICdOT1RfQ09ORklHVVJFRCc7CiAgY29uc3QgZW5kcG9pbnQgPSBgJHt1cmwucmVwbGFjZSgvXC8kLywgJycpfS9oZWFsdGhgOwogIGZvciAobGV0IGF0dGVtcHQgPSAwOyBhdHRlbXB0IDwgNjsgYXR0ZW1wdCArPSAxKSB7CiAgICB0cnkgewogICAgICBjb25zdCByZXNwb25zZSA9IGF3YWl0IGZldGNoKGVuZHBvaW50LCB7IHNpZ25hbDogQWJvcnRTaWduYWwudGltZW91dCgxNTAwMCkgfSk7CiAgICAgIGlmIChyZXNwb25zZS5vaykgcmV0dXJuICdDT05ORUNURUQnOwogICAgfSBjYXRjaCB7CiAgICAgIC8vIEZyZWUgcnVudGltZXMgbWF5IGJlIHdha2luZyBmcm9tIGlkbGU7IHJldHJ5IGJlbG93LgogICAgfQogICAgaWYgKGF0dGVtcHQgPCA1KSBhd2FpdCBuZXcgUHJvbWlzZShyZXNvbHZlID0+IHNldFRpbWVvdXQocmVzb2x2ZSwgNTAwMCkpOwogIH0KICByZXR1cm4gJ0VSUk9SJzsKfQoKYXN5bmMgZnVuY3Rpb24gcmVhZFBhY2thZ2VKc29u').decode(); new_s,count=pattern.subn(repl,s,count=1); assert count==1, f'pingEngine block count={count}'; p.write_text(new_s)"
       - name: Verify
         run: |
           npm install --no-audit --no-fund
