@@ -1,11 +1,13 @@
+import asyncio
 import importlib.util
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Header, HTTPException
@@ -14,11 +16,15 @@ from pydantic import BaseModel, Field
 CREWAI_AVAILABLE = importlib.util.find_spec('crewai') is not None
 OPENHANDS_AVAILABLE = importlib.util.find_spec('openhands.sdk') is not None and importlib.util.find_spec('openhands.tools') is not None
 
-app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.4.0')
+app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.5.0')
 
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini/gemini-2.5-flash').strip()
 DEFAULT_REPO_URL = os.getenv('DEFAULT_REPO_URL', 'https://github.com/uauz1/NAWAF-AI-2').strip()
 ALLOWED_GITHUB_OWNER = os.getenv('ALLOWED_GITHUB_OWNER', 'uauz1').strip()
+MAX_INSTRUCTION_CHARS = 12000
+MAX_EXECUTIONS_PER_MINUTE = 8
+EXECUTION_SEMAPHORE = asyncio.Semaphore(1)
+RECENT_EXECUTIONS: Deque[float] = deque()
 
 
 class OrchestrateRequest(BaseModel):
@@ -38,6 +44,15 @@ class ApplyRequest(BaseModel):
     commitMessage: str = 'Apply approved NAWAF HQ change'
 
 
+def enforce_rate_limit() -> None:
+    now = time.monotonic()
+    while RECENT_EXECUTIONS and now - RECENT_EXECUTIONS[0] > 60:
+        RECENT_EXECUTIONS.popleft()
+    if len(RECENT_EXECUTIONS) >= MAX_EXECUTIONS_PER_MINUTE:
+        raise HTTPException(status_code=429, detail='Runtime execution rate limit reached. Try again shortly.')
+    RECENT_EXECUTIONS.append(now)
+
+
 def crew_status(api_key: str = '') -> Dict[str, Any]:
     if not CREWAI_AVAILABLE:
         return {'status': 'ERROR', 'error': 'CrewAI package is not installed'}
@@ -50,8 +65,8 @@ def openhands_status(api_key: str = '') -> Dict[str, Any]:
     if not OPENHANDS_AVAILABLE:
         return {'status': 'ERROR', 'error': 'Official OpenHands SDK/tools packages are not installed'}
     if not api_key:
-        return {'status': 'READY', 'auth': 'per-request', 'model': GEMINI_MODEL, 'mode': 'official-sdk-local-workspace'}
-    return {'status': 'CONNECTED', 'auth': 'per-request', 'model': GEMINI_MODEL, 'mode': 'official-sdk-local-workspace'}
+        return {'status': 'READY', 'auth': 'per-request', 'model': GEMINI_MODEL, 'mode': 'official-sdk-file-workspace'}
+    return {'status': 'CONNECTED', 'auth': 'per-request', 'model': GEMINI_MODEL, 'mode': 'official-sdk-file-workspace'}
 
 
 @app.get('/health')
@@ -59,9 +74,12 @@ async def health() -> Dict[str, Any]:
     return {
         'ok': CREWAI_AVAILABLE and OPENHANDS_AVAILABLE,
         'service': 'nawaf-hq-agent-runtime',
+        'version': app.version,
         'crewai': crew_status(),
         'openhands': openhands_status(),
         'githubWrite': {'status': 'READY_FOR_TOKEN'},
+        'executionConcurrency': 1,
+        'executionRateLimitPerMinute': MAX_EXECUTIONS_PER_MINUTE,
         'timestamp': time.time(),
     }
 
@@ -81,6 +99,8 @@ def make_crew(params: Dict[str, Any], api_key: str):
     goal = str(params.get('goal') or params.get('instruction') or params.get('objective') or '').strip()
     if not goal:
         raise ValueError('A goal/instruction is required')
+    if len(goal) > MAX_INSTRUCTION_CHARS:
+        raise ValueError('Instruction is too long')
 
     employee = params.get('employee') or {}
     company = params.get('companyState') or {}
@@ -138,9 +158,11 @@ async def orchestrate(payload: OrchestrateRequest, x_gemini_key: Optional[str] =
         raise HTTPException(status_code=503, detail='X-Gemini-Key is required for real CrewAI execution')
     if crew_status(api_key)['status'] != 'CONNECTED':
         return {'ok': False, 'status': 'ERROR', 'engine': 'crewai', 'output': None, 'error': 'CrewAI unavailable'}
+    enforce_rate_limit()
     started = time.time()
     try:
-        result = make_crew(payload.params, api_key).kickoff()
+        async with EXECUTION_SEMAPHORE:
+            result = await asyncio.to_thread(lambda: make_crew(payload.params, api_key).kickoff())
         raw = getattr(result, 'raw', None) or str(result)
         return {'ok': True, 'status': 'SUCCESS', 'engine': 'crewai', 'output': {'text': raw}, 'durationMs': round((time.time() - started) * 1000)}
     except Exception as exc:
@@ -162,15 +184,39 @@ def run(cmd: List[str], cwd: str, timeout: int = 120) -> subprocess.CompletedPro
     return subprocess.run(cmd, cwd=cwd, timeout=timeout, text=True, capture_output=True, check=False)
 
 
+def compact_output(process: subprocess.CompletedProcess[str], limit: int = 4000) -> str:
+    text = (process.stdout or process.stderr or '').strip()
+    return text[-limit:]
+
+
+def verify_workspace(workspace: str, include_build: bool = True) -> List[Dict[str, Any]]:
+    checks: List[Dict[str, Any]] = []
+    package_json = Path(workspace) / 'package.json'
+    if not package_json.exists():
+        return checks
+
+    install = run(['npm', 'install', '--no-audit', '--no-fund', '--package-lock=false'], workspace, 180)
+    checks.append({'name': 'npm install', 'ok': install.returncode == 0, 'output': compact_output(install)})
+    if install.returncode != 0:
+        return checks
+
+    scripts = ['lint', 'test'] + (['build'] if include_build else [])
+    for script in scripts:
+        check = run(['npm', 'run', script, '--if-present'], workspace, 180)
+        checks.append({'name': f'npm run {script}', 'ok': check.returncode == 0, 'output': compact_output(check)})
+    return checks
+
+
 def execute_openhands(params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
     from openhands.sdk import Agent, Conversation, LLM, Tool
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.task_tracker import TaskTrackerTool
-    from openhands.tools.terminal import TerminalTool
 
     instruction = str(params.get('instruction') or params.get('objective') or params.get('taskTitle') or params.get('goal') or '').strip()
     if not instruction:
         raise ValueError('An instruction/objective is required for OpenHands execution')
+    if len(instruction) > MAX_INSTRUCTION_CHARS:
+        raise ValueError('Instruction is too long')
 
     repo_url = validate_repo_url(str(params.get('repoUrl') or DEFAULT_REPO_URL))
     temp_root = tempfile.mkdtemp(prefix='nawaf-openhands-')
@@ -188,33 +234,45 @@ def execute_openhands(params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
         agent = Agent(
             llm=llm,
             tools=[
-                Tool(name=TerminalTool.name),
                 Tool(name=FileEditorTool.name),
                 Tool(name=TaskTrackerTool.name),
             ],
         )
         conversation = Conversation(agent=agent, workspace=workspace)
         message = (
-            'You are the real technical executor for NAWAF HQ. Work only inside the provided repository. '
-            'Perform the requested task for real using terminal/file tools. Run relevant tests or checks before finishing. '
-            'Do not fabricate success. Do not commit or push. If blocked, stop and explain the exact blocker.\n\nTASK:\n' + instruction
+            'You are the real technical file executor for NAWAF HQ. Work only inside the provided repository workspace. '
+            'Inspect and edit repository files as needed using the available file tools. Do not use or request shell access. '
+            'Do not fabricate success. Do not commit or push. Verification commands are executed separately by the trusted runtime after you finish. '
+            'If the task cannot be completed with the available file tools, stop and explain the exact blocker.\n\nTASK:\n' + instruction
         )
         conversation.send_message(message)
         conversation.run()
 
+        checks = verify_workspace(workspace, include_build=True)
+        verification_passed = bool(checks) and all(check['ok'] for check in checks)
         diff = run(['git', 'diff', '--no-ext-diff', '--binary'], workspace, 30)
         changed = run(['git', 'status', '--short'], workspace, 30)
-        changed_files = [line for line in changed.stdout.splitlines() if line.strip()]
+        changed_files = [line[3:].strip() if len(line) > 3 else line.strip() for line in changed.stdout.splitlines() if line.strip()]
+        has_changes = bool(changed_files and diff.stdout.strip())
         return {
             'repository': repo_url,
             'baseCommit': base_commit,
-            'workspaceMode': 'ephemeral-clone',
+            'workspaceMode': 'ephemeral-clone-file-tools-only',
             'changedFiles': changed_files,
             'diff': diff.stdout[:180000],
             'diffTruncated': len(diff.stdout) > 180000,
-            'hasChanges': bool(changed_files and diff.stdout.strip()),
+            'hasChanges': has_changes,
+            'verificationPassed': verification_passed,
+            'checks': checks,
             'instruction': instruction,
-            'note': 'OpenHands executed in a real isolated clone. Any repository change requires CEO approval before GitHub write.',
+            'summary': (
+                'OpenHands produced repository changes and all configured verification checks passed.'
+                if has_changes and verification_passed
+                else 'OpenHands produced repository changes, but one or more verification checks failed or were unavailable.'
+                if has_changes
+                else 'OpenHands completed without producing a repository diff.'
+            ),
+            'note': 'OpenHands used real file tools in an isolated clone. Shell verification is run only by trusted runtime code. Any GitHub write still requires explicit approval and write credentials.',
         }
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
@@ -229,10 +287,13 @@ async def execute(payload: ExecuteRequest, x_gemini_key: Optional[str] = Header(
     if state['status'] != 'CONNECTED':
         return {'ok': False, 'status': state['status'], 'engine': 'openhands', 'output': None, 'error': state.get('error')}
 
+    enforce_rate_limit()
     started = time.time()
     try:
-        output = execute_openhands(payload.params, api_key)
-        return {'ok': True, 'status': 'SUCCESS', 'engine': 'openhands-sdk', 'action': payload.action, 'output': output, 'durationMs': round((time.time() - started) * 1000)}
+        async with EXECUTION_SEMAPHORE:
+            output = await asyncio.to_thread(execute_openhands, payload.params, api_key)
+        status = 'SUCCESS' if output.get('verificationPassed') else 'REVIEW_REQUIRED'
+        return {'ok': True, 'status': status, 'engine': 'openhands-sdk', 'action': payload.action, 'output': output, 'durationMs': round((time.time() - started) * 1000)}
     except Exception as exc:
         return {'ok': False, 'status': 'ERROR', 'engine': 'openhands-sdk', 'action': payload.action, 'error': str(exc), 'output': None, 'durationMs': round((time.time() - started) * 1000)}
 
@@ -281,18 +342,13 @@ def apply_approved_change(payload: ApplyRequest, github_token: str) -> Dict[str,
         if diff_check.returncode != 0:
             raise RuntimeError(f'git diff --check failed: {diff_check.stderr.strip()}')
 
-        checks: List[Dict[str, Any]] = [{'name': 'git diff --check', 'ok': True}]
-        package_json = Path(workspace) / 'package.json'
-        if package_json.exists():
-            install = run(['npm', 'install', '--no-audit', '--no-fund'], workspace, 180)
-            checks.append({'name': 'npm install', 'ok': install.returncode == 0})
-            if install.returncode != 0:
-                raise RuntimeError(f'npm install failed: {install.stderr.strip()}')
-            for script in ('lint', 'build'):
-                has_script = run(['npm', 'run', script, '--if-present'], workspace, 180)
-                checks.append({'name': f'npm run {script}', 'ok': has_script.returncode == 0})
-                if has_script.returncode != 0:
-                    raise RuntimeError(f'npm run {script} failed: {(has_script.stderr or has_script.stdout).strip()}')
+        checks: List[Dict[str, Any]] = [{'name': 'git diff --check', 'ok': True, 'output': compact_output(diff_check)}]
+        project_checks = verify_workspace(workspace, include_build=True)
+        checks.extend(project_checks)
+        failed_checks = [entry for entry in checks if not entry.get('ok')]
+        if failed_checks:
+            names = ', '.join(str(entry.get('name')) for entry in failed_checks)
+            raise RuntimeError(f'Approved change failed verification: {names}')
 
         run(['git', 'config', 'user.name', 'NAWAF HQ Automation'], workspace, 20)
         run(['git', 'config', 'user.email', 'nawaf-hq@users.noreply.github.com'], workspace, 20)
@@ -315,7 +371,7 @@ def apply_approved_change(payload: ApplyRequest, github_token: str) -> Dict[str,
         if push.returncode != 0:
             raise RuntimeError(f'git push failed: {sanitized_error(push.stderr, github_token)}')
 
-        changed = [line for line in status.stdout.splitlines() if line.strip()]
+        changed = [line[3:].strip() if len(line) > 3 else line.strip() for line in status.stdout.splitlines() if line.strip()]
         return {
             'ok': True,
             'status': 'APPLIED',
@@ -333,9 +389,11 @@ async def apply_change(payload: ApplyRequest, x_github_token: Optional[str] = He
     token = (x_github_token or '').strip()
     if not token:
         raise HTTPException(status_code=503, detail='X-GitHub-Token is required to write an approved change to GitHub')
+    enforce_rate_limit()
     started = time.time()
     try:
-        result = apply_approved_change(payload, token)
+        async with EXECUTION_SEMAPHORE:
+            result = await asyncio.to_thread(apply_approved_change, payload, token)
         result['durationMs'] = round((time.time() - started) * 1000)
         return result
     except Exception as exc:
