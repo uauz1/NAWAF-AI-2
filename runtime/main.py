@@ -17,13 +17,14 @@ from pydantic import BaseModel, Field
 CREWAI_AVAILABLE = importlib.util.find_spec('crewai') is not None
 OPENHANDS_AVAILABLE = importlib.util.find_spec('openhands.sdk') is not None and importlib.util.find_spec('openhands.tools') is not None
 
-app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.6.0')
+app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.6.1')
 
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini/gemini-3.6-flash').strip()
 DEFAULT_REPO_URL = os.getenv('DEFAULT_REPO_URL', 'https://github.com/uauz1/NAWAF-AI-2').strip()
 ALLOWED_GITHUB_OWNER = os.getenv('ALLOWED_GITHUB_OWNER', 'uauz1').strip()
 MAX_INSTRUCTION_CHARS = 12000
 MAX_EXECUTIONS_PER_MINUTE = 8
+MAX_OPENHANDS_ITERATIONS = max(6, min(20, int(os.getenv('OPENHANDS_MAX_ITERATIONS', '12'))))
 EXECUTION_SEMAPHORE = asyncio.Semaphore(1)
 RECENT_EXECUTIONS: Deque[float] = deque()
 
@@ -82,6 +83,7 @@ async def health() -> Dict[str, Any]:
         'githubWrite': {'status': 'READY_FOR_TOKEN'},
         'executionConcurrency': 1,
         'executionRateLimitPerMinute': MAX_EXECUTIONS_PER_MINUTE,
+        'maxOpenHandsIterations': MAX_OPENHANDS_ITERATIONS,
         'timestamp': time.time(),
     }
 
@@ -93,6 +95,7 @@ async def status() -> Dict[str, Any]:
         'openhands': openhands_status(),
         'githubPrivateRepo': {'status': 'READY_FOR_TOKEN'},
         'githubWrite': {'status': 'READY_FOR_TOKEN'},
+        'maxOpenHandsIterations': MAX_OPENHANDS_ITERATIONS,
     }
 
 
@@ -267,12 +270,13 @@ def execute_openhands(params: Dict[str, Any], api_key: str, github_token: str = 
                 Tool(name=TaskTrackerTool.name),
             ],
         )
-        conversation = Conversation(agent=agent, workspace=workspace, max_iteration_per_run=6)
+        conversation = Conversation(agent=agent, workspace=workspace, max_iteration_per_run=MAX_OPENHANDS_ITERATIONS)
         message = (
             'You are the real technical file executor for NAWAF HQ. Work only inside the provided repository workspace. '
             'Inspect and edit repository files as needed using the available file tools. Do not use or request shell access. '
             'Do not fabricate success. Do not commit or push. Verification commands are executed separately by the trusted runtime after you finish. '
-            'You have a strict six-step execution budget because this runs behind a synchronous production gateway. Prioritize the requested file edits immediately; avoid unnecessary exploration or narration. If the task cannot be completed with the available file tools, stop and explain the exact blocker.\n\nTASK:\n' + instruction
+            f'You have a strict {MAX_OPENHANDS_ITERATIONS}-step execution budget because this runs behind a synchronous production gateway. '
+            'Prioritize the requested file edits immediately; avoid unnecessary exploration or narration. If the task cannot be completed with the available file tools, stop and explain the exact blocker.\n\nTASK:\n' + instruction
         )
         conversation.send_message(message)
         conversation.run()
