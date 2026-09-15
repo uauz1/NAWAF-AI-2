@@ -6,6 +6,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 CREWAI_AVAILABLE = importlib.util.find_spec('crewai') is not None
 OPENHANDS_AVAILABLE = importlib.util.find_spec('openhands.sdk') is not None and importlib.util.find_spec('openhands.tools') is not None
 
-app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.3.0')
+app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.4.0')
 
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini/gemini-2.5-flash').strip()
 DEFAULT_REPO_URL = os.getenv('DEFAULT_REPO_URL', 'https://github.com/uauz1/NAWAF-AI-2').strip()
@@ -28,6 +29,13 @@ class OrchestrateRequest(BaseModel):
 class ExecuteRequest(BaseModel):
     action: str
     params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ApplyRequest(BaseModel):
+    repository: str
+    baseCommit: str
+    diff: str
+    commitMessage: str = 'Apply approved NAWAF HQ change'
 
 
 def crew_status(api_key: str = '') -> Dict[str, Any]:
@@ -53,13 +61,18 @@ async def health() -> Dict[str, Any]:
         'service': 'nawaf-hq-agent-runtime',
         'crewai': crew_status(),
         'openhands': openhands_status(),
+        'githubWrite': {'status': 'READY_FOR_TOKEN'},
         'timestamp': time.time(),
     }
 
 
 @app.get('/status')
 async def status() -> Dict[str, Any]:
-    return {'crewai': crew_status(), 'openhands': openhands_status()}
+    return {
+        'crewai': crew_status(),
+        'openhands': openhands_status(),
+        'githubWrite': {'status': 'READY_FOR_TOKEN'},
+    }
 
 
 def make_crew(params: Dict[str, Any], api_key: str):
@@ -136,10 +149,13 @@ async def orchestrate(payload: OrchestrateRequest, x_gemini_key: Optional[str] =
 
 def validate_repo_url(repo_url: str) -> str:
     repo_url = repo_url.strip().removesuffix('.git')
-    allowed_prefix = f'https://github.com/{ALLOWED_GITHUB_OWNER}/'
-    if not repo_url.startswith(allowed_prefix):
+    parsed = urlparse(repo_url)
+    if parsed.scheme != 'https' or parsed.netloc != 'github.com':
+        raise ValueError('Only https://github.com repositories are allowed')
+    parts = parsed.path.strip('/').split('/')
+    if len(parts) != 2 or parts[0] != ALLOWED_GITHUB_OWNER:
         raise ValueError(f'Repository must be under github.com/{ALLOWED_GITHUB_OWNER}/')
-    return repo_url
+    return f'https://github.com/{parts[0]}/{parts[1]}'
 
 
 def run(cmd: List[str], cwd: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -163,6 +179,10 @@ def execute_openhands(params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
         clone = run(['git', 'clone', '--depth', '1', f'{repo_url}.git', workspace], temp_root, 120)
         if clone.returncode != 0:
             raise RuntimeError(f'git clone failed: {clone.stderr.strip()}')
+        base = run(['git', 'rev-parse', 'HEAD'], workspace, 20)
+        if base.returncode != 0:
+            raise RuntimeError('Could not resolve repository HEAD')
+        base_commit = base.stdout.strip()
 
         llm = LLM(model=GEMINI_MODEL, api_key=api_key)
         agent = Agent(
@@ -177,20 +197,24 @@ def execute_openhands(params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
         message = (
             'You are the real technical executor for NAWAF HQ. Work only inside the provided repository. '
             'Perform the requested task for real using terminal/file tools. Run relevant tests or checks before finishing. '
-            'Do not fabricate success. If blocked, stop and explain the exact blocker.\n\nTASK:\n' + instruction
+            'Do not fabricate success. Do not commit or push. If blocked, stop and explain the exact blocker.\n\nTASK:\n' + instruction
         )
         conversation.send_message(message)
         conversation.run()
 
-        diff = run(['git', 'diff', '--no-ext-diff'], workspace, 30)
+        diff = run(['git', 'diff', '--no-ext-diff', '--binary'], workspace, 30)
         changed = run(['git', 'status', '--short'], workspace, 30)
+        changed_files = [line for line in changed.stdout.splitlines() if line.strip()]
         return {
             'repository': repo_url,
+            'baseCommit': base_commit,
             'workspaceMode': 'ephemeral-clone',
-            'changedFiles': [line for line in changed.stdout.splitlines() if line.strip()],
-            'diff': diff.stdout[:120000],
-            'diffTruncated': len(diff.stdout) > 120000,
-            'note': 'Execution was performed by the official OpenHands SDK in a real temporary repository clone. Changes are returned as a diff and are not pushed automatically.',
+            'changedFiles': changed_files,
+            'diff': diff.stdout[:180000],
+            'diffTruncated': len(diff.stdout) > 180000,
+            'hasChanges': bool(changed_files and diff.stdout.strip()),
+            'instruction': instruction,
+            'note': 'OpenHands executed in a real isolated clone. Any repository change requires CEO approval before GitHub write.',
         }
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
@@ -211,3 +235,113 @@ async def execute(payload: ExecuteRequest, x_gemini_key: Optional[str] = Header(
         return {'ok': True, 'status': 'SUCCESS', 'engine': 'openhands-sdk', 'action': payload.action, 'output': output, 'durationMs': round((time.time() - started) * 1000)}
     except Exception as exc:
         return {'ok': False, 'status': 'ERROR', 'engine': 'openhands-sdk', 'action': payload.action, 'error': str(exc), 'output': None, 'durationMs': round((time.time() - started) * 1000)}
+
+
+def sanitized_error(text: str, token: str) -> str:
+    safe = text or ''
+    if token:
+        safe = safe.replace(token, '[REDACTED]')
+    return safe[-5000:]
+
+
+def apply_approved_change(payload: ApplyRequest, github_token: str) -> Dict[str, Any]:
+    repo_url = validate_repo_url(payload.repository)
+    if not payload.baseCommit or not payload.diff.strip():
+        raise ValueError('baseCommit and non-empty diff are required')
+    if len(payload.diff) > 250000:
+        raise ValueError('Diff is too large to apply safely')
+
+    temp_root = tempfile.mkdtemp(prefix='nawaf-apply-')
+    workspace = str(Path(temp_root) / 'repo')
+    try:
+        clone = run(['git', 'clone', '--depth', '1', f'{repo_url}.git', workspace], temp_root, 120)
+        if clone.returncode != 0:
+            raise RuntimeError(f'git clone failed: {clone.stderr.strip()}')
+        head = run(['git', 'rev-parse', 'HEAD'], workspace, 20)
+        current_head = head.stdout.strip()
+        if current_head != payload.baseCommit:
+            return {
+                'ok': False,
+                'status': 'CONFLICT',
+                'error': 'Repository changed after OpenHands produced this proposal. Re-run the task before approval.',
+                'expectedBaseCommit': payload.baseCommit,
+                'currentCommit': current_head,
+            }
+
+        patch_path = Path(temp_root) / 'approved.patch'
+        patch_path.write_text(payload.diff, encoding='utf-8')
+        check = run(['git', 'apply', '--check', '--binary', str(patch_path)], workspace, 30)
+        if check.returncode != 0:
+            raise RuntimeError(f'git apply --check failed: {check.stderr.strip()}')
+        applied = run(['git', 'apply', '--binary', str(patch_path)], workspace, 30)
+        if applied.returncode != 0:
+            raise RuntimeError(f'git apply failed: {applied.stderr.strip()}')
+
+        diff_check = run(['git', 'diff', '--check'], workspace, 30)
+        if diff_check.returncode != 0:
+            raise RuntimeError(f'git diff --check failed: {diff_check.stderr.strip()}')
+
+        checks: List[Dict[str, Any]] = [{'name': 'git diff --check', 'ok': True}]
+        package_json = Path(workspace) / 'package.json'
+        if package_json.exists():
+            install = run(['npm', 'install', '--no-audit', '--no-fund'], workspace, 180)
+            checks.append({'name': 'npm install', 'ok': install.returncode == 0})
+            if install.returncode != 0:
+                raise RuntimeError(f'npm install failed: {install.stderr.strip()}')
+            for script in ('lint', 'build'):
+                has_script = run(['npm', 'run', script, '--if-present'], workspace, 180)
+                checks.append({'name': f'npm run {script}', 'ok': has_script.returncode == 0})
+                if has_script.returncode != 0:
+                    raise RuntimeError(f'npm run {script} failed: {(has_script.stderr or has_script.stdout).strip()}')
+
+        run(['git', 'config', 'user.name', 'NAWAF HQ Automation'], workspace, 20)
+        run(['git', 'config', 'user.email', 'nawaf-hq@users.noreply.github.com'], workspace, 20)
+        added = run(['git', 'add', '-A'], workspace, 20)
+        if added.returncode != 0:
+            raise RuntimeError('git add failed')
+        status = run(['git', 'status', '--porcelain'], workspace, 20)
+        if not status.stdout.strip():
+            return {'ok': False, 'status': 'NO_CHANGES', 'error': 'Approved proposal produced no repository changes.'}
+
+        message = (payload.commitMessage or 'Apply approved NAWAF HQ change').strip().replace('\n', ' ')[:180]
+        commit = run(['git', 'commit', '-m', message], workspace, 60)
+        if commit.returncode != 0:
+            raise RuntimeError(f'git commit failed: {commit.stderr.strip()}')
+        sha = run(['git', 'rev-parse', 'HEAD'], workspace, 20).stdout.strip()
+
+        parsed = urlparse(repo_url)
+        authed = f'https://x-access-token:{github_token}@github.com{parsed.path}.git'
+        push = run(['git', 'push', authed, 'HEAD:main'], workspace, 120)
+        if push.returncode != 0:
+            raise RuntimeError(f'git push failed: {sanitized_error(push.stderr, github_token)}')
+
+        changed = [line for line in status.stdout.splitlines() if line.strip()]
+        return {
+            'ok': True,
+            'status': 'APPLIED',
+            'repository': repo_url,
+            'commitSha': sha,
+            'changedFiles': changed,
+            'checks': checks,
+        }
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+@app.post('/api/apply')
+async def apply_change(payload: ApplyRequest, x_github_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    token = (x_github_token or '').strip()
+    if not token:
+        raise HTTPException(status_code=503, detail='X-GitHub-Token is required to write an approved change to GitHub')
+    started = time.time()
+    try:
+        result = apply_approved_change(payload, token)
+        result['durationMs'] = round((time.time() - started) * 1000)
+        return result
+    except Exception as exc:
+        return {
+            'ok': False,
+            'status': 'ERROR',
+            'error': sanitized_error(str(exc), token),
+            'durationMs': round((time.time() - started) * 1000),
+        }
