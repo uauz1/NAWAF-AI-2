@@ -1,0 +1,1 @@
+NAWAF HQ cold-start health-check fix deployed from main.
