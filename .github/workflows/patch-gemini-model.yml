@@ -1,0 +1,47 @@
+name: Patch Gemini model to 3.6 Flash
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-gemini-model.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update Gemini model references
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          changed = []
+          for name in ['server.ts', 'runtime/main.py']:
+              p = Path(name)
+              s = p.read_text()
+              old = s
+              s = s.replace('gemini/gemini-2.5-flash', 'gemini/gemini-3.6-flash')
+              s = s.replace("model: 'gemini-2.5-flash'", "model: 'gemini-3.6-flash'")
+              if s != old:
+                  p.write_text(s)
+                  changed.append(name)
+          if not changed:
+              raise SystemExit('No Gemini 2.5 model references found to update')
+          print('Updated:', ', '.join(changed))
+          PY
+      - name: Verify
+        run: |
+          npm install --no-audit --no-fund
+          npm run lint
+          npm test
+          npm run build
+          python -m py_compile runtime/main.py
+      - name: Commit model update
+        run: |
+          git config user.name 'NAWAF HQ Automation'
+          git config user.email 'nawaf-hq@users.noreply.github.com'
+          git add server.ts runtime/main.py
+          git commit -m 'Use Gemini 3.6 Flash runtime model'
+          git push origin HEAD:main
