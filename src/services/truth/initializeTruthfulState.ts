@@ -5,7 +5,7 @@ import {
 } from '../../data/initialData';
 
 const BASE = 'nawaf_hq_os_data_v1';
-const MIGRATION_KEY = 'nawaf_hq_truth_migration_v3';
+const MIGRATION_KEY = 'nawaf_hq_truth_migration_v4';
 
 function safeSet(key: string, value: unknown) {
   try {
@@ -41,6 +41,7 @@ export function initializeTruthfulState() {
     status: 'READY' as const,
     currentTask: '',
     taskProgress: 0,
+    productivity: 0,
     recentWork: [],
     tasksCompletedCount: 0,
     collaborationHistory: [],
@@ -60,6 +61,6 @@ export function initializeTruthfulState() {
   safeSet(`${BASE}_advisor_msgs`, []);
   localStorage.removeItem(`${BASE}_meeting`);
 
-  // Force any earlier fake-state migration to be superseded once, then never repeat.
+  // Supersede earlier seeded/demo-state migrations once, then keep this baseline stable.
   localStorage.setItem(MIGRATION_KEY, 'done');
 }
