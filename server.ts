@@ -9,7 +9,7 @@ import { GoogleGenAI } from '@google/genai';
 const execAsync = promisify(exec);
 type EngineStatus = 'CONNECTED' | 'NOT_CONFIGURED' | 'ERROR';
 const workspaceRoot = process.cwd();
-const DEFAULT_CREWAI_API_URL = 'https://nawaf-hq-crewai-runtime.onrender.com';
+const DEFAULT_RUNTIME_API_URL = 'https://nawaf-hq-crewai-runtime.onrender.com';
 
 async function pingEngine(url?: string | null): Promise<EngineStatus> {
   if (!url) return 'NOT_CONFIGURED';
@@ -56,8 +56,8 @@ function safeWorkspacePath(relativePath: string) {
 }
 
 async function engineSnapshot() {
-  const crewaiUrl = process.env.CREWAI_API_URL || DEFAULT_CREWAI_API_URL;
-  const openhandsUrl = process.env.OPENHANDS_API_URL || null;
+  const crewaiUrl = process.env.CREWAI_API_URL || DEFAULT_RUNTIME_API_URL;
+  const openhandsUrl = process.env.OPENHANDS_API_URL || DEFAULT_RUNTIME_API_URL;
   const [crewaiStatus, openhandsStatus] = await Promise.all([
     pingEngine(crewaiUrl),
     pingEngine(openhandsUrl),
@@ -207,7 +207,7 @@ ${userMessage}
       }
 
       if (action === 'orchestrate' || action === 'create_plan') {
-        const crewaiUrl = process.env.CREWAI_API_URL || DEFAULT_CREWAI_API_URL;
+        const crewaiUrl = process.env.CREWAI_API_URL || DEFAULT_RUNTIME_API_URL;
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) {
           return res.status(503).json({
@@ -240,33 +240,35 @@ ${userMessage}
       }
 
       if (['modify_code', 'execute_code', 'run_command', 'modify_file'].includes(action)) {
-        const openhandsUrl = process.env.OPENHANDS_API_URL;
-        if (!openhandsUrl) {
-          return res.json({
+        const openhandsUrl = process.env.OPENHANDS_API_URL || DEFAULT_RUNTIME_API_URL;
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) {
+          return res.status(503).json({
             ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
-            error: 'OPENHANDS: NOT_CONFIGURED. OPENHANDS_API_URL is not configured.',
+            error: 'GEMINI_API_KEY is not configured in the NAWAF HQ backend.',
           });
         }
         if (await pingEngine(openhandsUrl) !== 'CONNECTED') {
           return res.status(502).json({
             ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null,
-            error: 'OPENHANDS: ERROR. The configured service did not pass its health check.',
+            error: 'OPENHANDS: ERROR. The runtime did not pass its health check.',
           });
         }
         const response = await fetch(`${openhandsUrl.replace(/\/$/, '')}/api/execute`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Gemini-Key': apiKey },
           body: JSON.stringify({ action, params }),
-          signal: AbortSignal.timeout(120000),
+          signal: AbortSignal.timeout(180000),
         });
         const data = await response.json().catch(() => ({}));
-        return res.status(response.ok ? 200 : 502).json({
-          ok: response.ok,
+        const successful = response.ok && data?.ok !== false;
+        return res.status(successful ? 200 : 502).json({
+          ok: successful,
           action,
           startedAt,
           finishedAt: new Date().toISOString(),
-          output: response.ok ? data : null,
-          error: response.ok ? null : (data?.error || 'OpenHands execution failed.'),
+          output: successful ? data : null,
+          error: successful ? null : (data?.error || data?.detail || 'OpenHands execution failed.'),
         });
       }
 
@@ -365,31 +367,28 @@ ${userMessage}
       }
 
       if (tool === 'modify_file' || tool === 'run_command') {
-        const openhandsUrl = process.env.OPENHANDS_API_URL;
-        if (!openhandsUrl) {
-          return res.json({
-            success: false,
-            tool,
-            status: 'NOT_CONFIGURED',
-            error: 'OpenHands is not connected. Configure OPENHANDS_API_URL before code mutation or arbitrary command execution.',
-          });
+        const openhandsUrl = process.env.OPENHANDS_API_URL || DEFAULT_RUNTIME_API_URL;
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) {
+          return res.status(503).json({ success: false, tool, status: 'NOT_CONFIGURED', error: 'GEMINI_API_KEY is not configured.' });
         }
         if (await pingEngine(openhandsUrl) !== 'CONNECTED') {
           return res.status(502).json({ success: false, tool, status: 'ERROR', error: 'OpenHands health check failed.' });
         }
         const response = await fetch(`${openhandsUrl.replace(/\/$/, '')}/api/execute`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tool, params }),
-          signal: AbortSignal.timeout(120000),
+          headers: { 'Content-Type': 'application/json', 'X-Gemini-Key': apiKey },
+          body: JSON.stringify({ action: tool, params }),
+          signal: AbortSignal.timeout(180000),
         });
         const data = await response.json().catch(() => ({}));
-        return res.status(response.ok ? 200 : 502).json({
-          success: response.ok,
+        const successful = response.ok && data?.ok !== false;
+        return res.status(successful ? 200 : 502).json({
+          success: successful,
           tool,
-          status: response.ok ? 'CONNECTED' : 'ERROR',
-          data: response.ok ? data : undefined,
-          error: response.ok ? undefined : (data?.error || 'OpenHands execution failed.'),
+          status: successful ? 'CONNECTED' : 'ERROR',
+          data: successful ? data : undefined,
+          error: successful ? undefined : (data?.error || data?.detail || 'OpenHands execution failed.'),
         });
       }
 
