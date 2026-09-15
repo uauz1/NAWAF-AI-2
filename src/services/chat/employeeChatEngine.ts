@@ -40,6 +40,18 @@ function taskStatusLabel(status?: string) {
   return status ? (labels[status] || status) : 'غير محدد';
 }
 
+function summarizeRuntimeOutput(output: any) {
+  const inner = output?.output || output;
+  if (inner?.text) return String(inner.text);
+  if (inner?.output?.text) return String(inner.output.text);
+  if (inner?.diff || inner?.changedFiles) {
+    const changed = Array.isArray(inner.changedFiles) ? inner.changedFiles.join('\n') : 'لا توجد ملفات معدلة';
+    const diff = String(inner.diff || '').trim();
+    return `الملفات المتأثرة:\n${changed}${diff ? `\n\nالتغييرات الفعلية:\n${diff.slice(0, 5000)}${diff.length > 5000 ? '\n…' : ''}` : ''}`;
+  }
+  return JSON.stringify(output, null, 2);
+}
+
 async function askGroundedAgent(userMessage: string, context: EmployeeChatContext) {
   try {
     const response = await fetch('/api/agent/respond', {
@@ -78,23 +90,53 @@ export async function processEmployeeMessage(
   const execution = ExecutionAdapter.getInstance();
   const router = ToolRouter.getInstance();
 
-  // Real code mutation / command execution. Never fake success.
-  if (hasAny(query, ['عدل', 'اكتب كود', 'غير الملف', 'احفظ التعديل', 'نفذ الأمر', 'تنفيذ كود', 'شغل الأمر'])) {
+  // Commands that require planning/review go through the real CrewAI runtime.
+  if (hasAny(query, ['خطط', 'سو خطة', 'راجع المشروع', 'راجع ', 'جهز المشروع', 'جهز ', 'طور المشروع', 'حل المشاكل', 'حل المشكلة', 'قسم المهمة'])) {
+    const crewRes = await execution.execute('orchestrate', {
+      goal: userQuery,
+      instruction: userQuery,
+      employee: {
+        id: employee.id,
+        name: employee.name,
+        position: employee.position,
+        role: context.role,
+        permissions: context.permissions,
+      },
+      project: projectContext || null,
+      companyState,
+      availableTools: context.availableTools,
+    }, projectContext?.id);
+
+    if (crewRes.ok) {
+      return {
+        text: `حللت التوجيه فعلياً عبر CrewAI.\n\n${summarizeRuntimeOutput(crewRes.output)}`,
+        executedTools,
+      };
+    }
+    return {
+      text: `CrewAI ما قدر ينفذ التخطيط الآن: ${crewRes.error || 'لا توجد نتيجة من المحرك.'}`,
+      executedTools,
+    };
+  }
+
+  // Real code mutation / command execution through the official OpenHands SDK runtime.
+  if (hasAny(query, ['عدل', 'اكتب كود', 'غير الملف', 'احفظ التعديل', 'نفذ الأمر', 'تنفيذ كود', 'شغل الأمر', 'اصلح الكود', 'صلح الكود'])) {
     const execRes = await execution.execute('modify_code', {
       instruction: userQuery,
       employeeId: employee.id,
       employeeRole: employee.position,
       projectId: projectContext?.id,
+      projectName: projectContext?.name,
     }, projectContext?.id);
 
     if (execRes.ok) {
       return {
-        text: `تم التنفيذ فعلياً عبر محرك التنفيذ المتصل.\n${JSON.stringify(execRes.output, null, 2)}`,
+        text: `نفذت المهمة فعلياً عبر OpenHands داخل نسخة معزولة من المستودع. ما اعتبرت التغيير منشوراً؛ هذه نتيجة التنفيذ الحقيقية:\n\n${summarizeRuntimeOutput(execRes.output)}`,
         executedTools,
       };
     }
     return {
-      text: `ما تم تنفيذ التعديل. ${execRes.error || 'OpenHands غير متصل حالياً.'}`,
+      text: `ما تم تنفيذ التعديل. ${execRes.error || 'OpenHands لم يرجع نتيجة ناجحة.'}`,
       executedTools,
     };
   }
@@ -195,8 +237,6 @@ export async function processEmployeeMessage(
     };
   }
 
-  // Real conversational intelligence, grounded in actual state. If Gemini is unavailable,
-  // fall back to factual state instead of canned pretend-work replies.
   const aiText = await askGroundedAgent(userQuery, {
     ...context,
     toolResults: [...context.toolResults, ...executedTools],
