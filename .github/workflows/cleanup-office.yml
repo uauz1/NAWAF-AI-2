@@ -1,0 +1,35 @@
+name: One-time 3D office truth cleanup
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/cleanup-interactive-office.mjs'
+      - '.github/workflows/cleanup-office.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply deterministic cleanup
+        run: node scripts/cleanup-interactive-office.mjs
+      - name: Commit cleanup if needed
+        run: |
+          if git diff --quiet; then
+            echo "No cleanup changes needed."
+            exit 0
+          fi
+          git config user.name "NAWAF HQ CI"
+          git config user.email "nawaf-hq@users.noreply.github.com"
+          git add src/components/office/InteractiveOffice.tsx
+          git commit -m "Remove simulated 3D office interactions"
+          git push origin HEAD:main
