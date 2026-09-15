@@ -1,0 +1,119 @@
+name: One-time production E2E smoke
+
+on:
+  push:
+    paths:
+      - '.github/workflows/production-e2e-smoke.yml'
+
+jobs:
+  smoke:
+    if: github.event.head_commit.message == 'Run one-time production E2E smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Wait for production health
+        run: |
+          set -euo pipefail
+          BASE='https://nawaf-hq-live-v2.onrender.com'
+          for i in $(seq 1 30); do
+            if curl -fsS "$BASE/api/health" >/tmp/health.json; then
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Production health never became reachable' >&2
+          exit 1
+
+      - name: Verify engines and backend secrets are connected
+        run: |
+          set -euo pipefail
+          BASE='https://nawaf-hq-live-v2.onrender.com'
+          curl -fsS "$BASE/api/engine/status" -o /tmp/status.json
+          cat /tmp/status.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const s = JSON.parse(fs.readFileSync('/tmp/status.json','utf8'));
+          for (const [label, value] of [
+            ['CrewAI', s.crewai?.status],
+            ['OpenHands', s.openhands?.status],
+            ['Gemini', s.gemini?.status],
+            ['GitHub write', s.githubWrite?.status],
+          ]) {
+            if (value !== 'CONNECTED') throw new Error(`${label} expected CONNECTED, got ${value}`);
+          }
+          NODE
+
+      - name: Verify Gemini employee response
+        run: |
+          set -euo pipefail
+          BASE='https://nawaf-hq-live-v2.onrender.com'
+          curl -fsS -X POST "$BASE/api/agent/respond" \
+            -H 'Content-Type: application/json' \
+            --data '{"userMessage":"اختبار اتصال فقط. رد بكلمة جاهز.","context":{"employee":{"name":"فهد","position":"مهندس برمجيات"},"verifiedTest":true}}' \
+            -o /tmp/agent.json
+          cat /tmp/agent.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const s = JSON.parse(fs.readFileSync('/tmp/agent.json','utf8'));
+          if (s.ok !== true || !String(s.text || '').trim()) throw new Error('Gemini employee response failed');
+          NODE
+
+      - name: Verify real CrewAI orchestration
+        run: |
+          set -euo pipefail
+          BASE='https://nawaf-hq-live-v2.onrender.com'
+          curl -fsS -X POST "$BASE/api/execute" \
+            -H 'Content-Type: application/json' \
+            --data '{"action":"orchestrate","params":{"goal":"Production connectivity smoke test only. Produce a truthful two-step plan and do not claim any code execution.","employee":{"name":"فهد","position":"مهندس برمجيات"},"project":{"id":"hq","name":"NAWAF HQ"},"companyState":{"smokeTest":true},"availableTools":[]}}' \
+            -o /tmp/crew.json
+          cat /tmp/crew.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const s = JSON.parse(fs.readFileSync('/tmp/crew.json','utf8'));
+          if (s.ok !== true || s.output?.engine !== 'crewai' || s.output?.status !== 'SUCCESS') {
+            throw new Error(`CrewAI smoke failed: ${JSON.stringify(s)}`);
+          }
+          NODE
+
+      - name: Verify OpenHands isolated edit and approval pipeline
+        run: |
+          set -euo pipefail
+          BASE='https://nawaf-hq-live-v2.onrender.com'
+          INSTRUCTION='Create a new file docs/production-e2e-smoke.txt containing exactly: NAWAF HQ production E2E smoke passed. Do not modify any other file.'
+          jq -n --arg instruction "$INSTRUCTION" '{action:"modify_code",params:{instruction:$instruction,repoUrl:"https://github.com/uauz1/NAWAF-AI-2"}}' >/tmp/openhands-request.json
+          curl -fsS -X POST "$BASE/api/execute" \
+            -H 'Content-Type: application/json' \
+            --data-binary @/tmp/openhands-request.json \
+            -o /tmp/openhands.json
+          cat /tmp/openhands.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const s = JSON.parse(fs.readFileSync('/tmp/openhands.json','utf8'));
+          const runtime = s.output;
+          const proposal = runtime?.output;
+          if (s.ok !== true || runtime?.engine !== 'openhands-sdk' || !proposal?.hasChanges || proposal?.verificationPassed !== true) {
+            throw new Error(`OpenHands smoke failed: ${JSON.stringify(s)}`);
+          }
+          fs.writeFileSync('/tmp/proposal.json', JSON.stringify({
+            proposal: {
+              repository: proposal.repository,
+              baseCommit: proposal.baseCommit,
+              diff: proposal.diff,
+              commitMessage: '[e2e-smoke-apply] Verify approved OpenHands GitHub write'
+            },
+            decisionId: 'production-e2e-smoke'
+          }));
+          NODE
+          curl -fsS -X POST "$BASE/api/apply-change" \
+            -H 'Content-Type: application/json' \
+            --data-binary @/tmp/proposal.json \
+            -o /tmp/apply.json
+          cat /tmp/apply.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const s = JSON.parse(fs.readFileSync('/tmp/apply.json','utf8'));
+          if (s.ok !== true || s.status !== 'APPLIED' || !s.commitSha) {
+            throw new Error(`Approved GitHub apply failed: ${JSON.stringify(s)}`);
+          }
+          NODE
