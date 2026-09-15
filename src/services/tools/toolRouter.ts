@@ -6,7 +6,6 @@ export type ToolName =
   | 'run_linter'
   | 'run_tests'
   | 'modify_file'
-  | 'run_command'
   | 'request_ceo_approval';
 
 export interface ToolExecutionRequest {
@@ -66,9 +65,6 @@ export class ToolRouter {
           break;
         case 'modify_file':
           res = await adapter.modifyFile(request.params?.filePath || '', request.params?.content || '');
-          break;
-        case 'run_command':
-          res = await adapter.runCommand(request.params?.command || '');
           break;
         case 'request_ceo_approval':
           return {
