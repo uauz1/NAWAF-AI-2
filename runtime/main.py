@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import importlib.util
 import os
 import shutil
@@ -16,7 +17,7 @@ from pydantic import BaseModel, Field
 CREWAI_AVAILABLE = importlib.util.find_spec('crewai') is not None
 OPENHANDS_AVAILABLE = importlib.util.find_spec('openhands.sdk') is not None and importlib.util.find_spec('openhands.tools') is not None
 
-app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.5.0')
+app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.6.0')
 
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini/gemini-3.6-flash').strip()
 DEFAULT_REPO_URL = os.getenv('DEFAULT_REPO_URL', 'https://github.com/uauz1/NAWAF-AI-2').strip()
@@ -77,6 +78,7 @@ async def health() -> Dict[str, Any]:
         'version': app.version,
         'crewai': crew_status(),
         'openhands': openhands_status(),
+        'githubPrivateRepo': {'status': 'READY_FOR_TOKEN'},
         'githubWrite': {'status': 'READY_FOR_TOKEN'},
         'executionConcurrency': 1,
         'executionRateLimitPerMinute': MAX_EXECUTIONS_PER_MINUTE,
@@ -89,6 +91,7 @@ async def status() -> Dict[str, Any]:
     return {
         'crewai': crew_status(),
         'openhands': openhands_status(),
+        'githubPrivateRepo': {'status': 'READY_FOR_TOKEN'},
         'githubWrite': {'status': 'READY_FOR_TOKEN'},
     }
 
@@ -180,8 +183,31 @@ def validate_repo_url(repo_url: str) -> str:
     return f'https://github.com/{parts[0]}/{parts[1]}'
 
 
-def run(cmd: List[str], cwd: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, timeout=timeout, text=True, capture_output=True, check=False)
+def run(cmd: List[str], cwd: str, timeout: int = 120, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=cwd, timeout=timeout, text=True, capture_output=True, check=False, env=env)
+
+
+def sanitized_error(text: str, token: str) -> str:
+    safe = text or ''
+    if token:
+        safe = safe.replace(token, '[REDACTED]')
+    return safe[-5000:]
+
+
+def github_auth_env(token: str) -> Optional[Dict[str, str]]:
+    if not token:
+        return None
+    env = os.environ.copy()
+    basic = base64.b64encode(f'x-access-token:{token}'.encode('utf-8')).decode('ascii')
+    env['GIT_CONFIG_COUNT'] = '1'
+    env['GIT_CONFIG_KEY_0'] = 'http.extraHeader'
+    env['GIT_CONFIG_VALUE_0'] = f'Authorization: Basic {basic}'
+    env['GIT_TERMINAL_PROMPT'] = '0'
+    return env
+
+
+def clone_repository(repo_url: str, workspace: str, temp_root: str, github_token: str = '') -> subprocess.CompletedProcess[str]:
+    return run(['git', 'clone', '--depth', '1', f'{repo_url}.git', workspace], temp_root, 120, github_auth_env(github_token))
 
 
 def compact_output(process: subprocess.CompletedProcess[str], limit: int = 4000) -> str:
@@ -207,7 +233,7 @@ def verify_workspace(workspace: str, include_build: bool = True) -> List[Dict[st
     return checks
 
 
-def execute_openhands(params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+def execute_openhands(params: Dict[str, Any], api_key: str, github_token: str = '') -> Dict[str, Any]:
     from openhands.sdk import Agent, Conversation, LLM, Tool
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.task_tracker import TaskTrackerTool
@@ -222,9 +248,12 @@ def execute_openhands(params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
     temp_root = tempfile.mkdtemp(prefix='nawaf-openhands-')
     workspace = str(Path(temp_root) / 'repo')
     try:
-        clone = run(['git', 'clone', '--depth', '1', f'{repo_url}.git', workspace], temp_root, 120)
+        clone = clone_repository(repo_url, workspace, temp_root, github_token)
         if clone.returncode != 0:
-            raise RuntimeError(f'git clone failed: {clone.stderr.strip()}')
+            detail = sanitized_error(clone.stderr.strip(), github_token)
+            if not github_token and ('Authentication failed' in detail or 'could not read Username' in detail or 'not found' in detail.lower()):
+                raise RuntimeError('Private repository access requires a GitHub token in the backend.')
+            raise RuntimeError(f'git clone failed: {detail}')
         base = run(['git', 'rev-parse', 'HEAD'], workspace, 20)
         if base.returncode != 0:
             raise RuntimeError('Could not resolve repository HEAD')
@@ -279,8 +308,9 @@ def execute_openhands(params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
 
 
 @app.post('/api/execute')
-async def execute(payload: ExecuteRequest, x_gemini_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+async def execute(payload: ExecuteRequest, x_gemini_key: Optional[str] = Header(default=None), x_github_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     api_key = (x_gemini_key or '').strip()
+    github_token = (x_github_token or '').strip()
     if not api_key:
         raise HTTPException(status_code=503, detail='X-Gemini-Key is required for real OpenHands execution')
     state = openhands_status(api_key)
@@ -291,18 +321,11 @@ async def execute(payload: ExecuteRequest, x_gemini_key: Optional[str] = Header(
     started = time.time()
     try:
         async with EXECUTION_SEMAPHORE:
-            output = await asyncio.to_thread(execute_openhands, payload.params, api_key)
+            output = await asyncio.to_thread(execute_openhands, payload.params, api_key, github_token)
         status = 'SUCCESS' if output.get('verificationPassed') else 'REVIEW_REQUIRED'
         return {'ok': True, 'status': status, 'engine': 'openhands-sdk', 'action': payload.action, 'output': output, 'durationMs': round((time.time() - started) * 1000)}
     except Exception as exc:
-        return {'ok': False, 'status': 'ERROR', 'engine': 'openhands-sdk', 'action': payload.action, 'error': str(exc), 'output': None, 'durationMs': round((time.time() - started) * 1000)}
-
-
-def sanitized_error(text: str, token: str) -> str:
-    safe = text or ''
-    if token:
-        safe = safe.replace(token, '[REDACTED]')
-    return safe[-5000:]
+        return {'ok': False, 'status': 'ERROR', 'engine': 'openhands-sdk', 'action': payload.action, 'error': sanitized_error(str(exc), github_token), 'output': None, 'durationMs': round((time.time() - started) * 1000)}
 
 
 def apply_approved_change(payload: ApplyRequest, github_token: str) -> Dict[str, Any]:
@@ -315,9 +338,9 @@ def apply_approved_change(payload: ApplyRequest, github_token: str) -> Dict[str,
     temp_root = tempfile.mkdtemp(prefix='nawaf-apply-')
     workspace = str(Path(temp_root) / 'repo')
     try:
-        clone = run(['git', 'clone', '--depth', '1', f'{repo_url}.git', workspace], temp_root, 120)
+        clone = clone_repository(repo_url, workspace, temp_root, github_token)
         if clone.returncode != 0:
-            raise RuntimeError(f'git clone failed: {clone.stderr.strip()}')
+            raise RuntimeError(f'git clone failed: {sanitized_error(clone.stderr.strip(), github_token)}')
         head = run(['git', 'rev-parse', 'HEAD'], workspace, 20)
         current_head = head.stdout.strip()
         if current_head != payload.baseCommit:
@@ -365,9 +388,7 @@ def apply_approved_change(payload: ApplyRequest, github_token: str) -> Dict[str,
             raise RuntimeError(f'git commit failed: {commit.stderr.strip()}')
         sha = run(['git', 'rev-parse', 'HEAD'], workspace, 20).stdout.strip()
 
-        parsed = urlparse(repo_url)
-        authed = f'https://x-access-token:{github_token}@github.com{parsed.path}.git'
-        push = run(['git', 'push', authed, 'HEAD:main'], workspace, 120)
+        push = run(['git', 'push', f'{repo_url}.git', 'HEAD:main'], workspace, 120, github_auth_env(github_token))
         if push.returncode != 0:
             raise RuntimeError(f'git push failed: {sanitized_error(push.stderr, github_token)}')
 
