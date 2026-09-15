@@ -1,4 +1,4 @@
-name: Patch runtime cold-start health check
+name: Patch runtime cold-start retry
 
 on:
   push:
@@ -10,21 +10,39 @@ permissions:
 
 jobs:
   patch:
-    if: github.event.head_commit.message == 'Patch runtime cold-start health check'
+    if: github.event.head_commit.message == 'Patch runtime cold-start retry'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Patch backend engine health timeout
+      - name: Patch backend engine health retry
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
+
           p = Path('server.ts')
           s = p.read_text()
-          old = "AbortSignal.timeout(5000)"
-          new = "AbortSignal.timeout(70000)"
-          if old not in s:
-              raise SystemExit('Expected 5s engine timeout marker not found')
-          p.write_text(s.replace(old, new, 1))
+          pattern = re.compile(r"async function pingEngine\(url\?: string \| null\): Promise<EngineStatus> \{.*?\n\}\n\nasync function readPackageJson", re.S)
+          replacement = """async function pingEngine(url?: string | null): Promise<EngineStatus> {
+  if (!url) return 'NOT_CONFIGURED';
+  const endpoint = `${url.replace(/\\/$/, '')}/health`;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const response = await fetch(endpoint, { signal: AbortSignal.timeout(15000) });
+      if (response.ok) return 'CONNECTED';
+    } catch {
+      // Free runtimes may be waking from idle; retry below.
+    }
+    if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 5000));
+  }
+  return 'ERROR';
+}
+
+async function readPackageJson"""
+          new_s, count = pattern.subn(replacement, s, count=1)
+          if count != 1:
+              raise SystemExit(f'Expected pingEngine block not found exactly once; found {count}')
+          p.write_text(new_s)
           PY
       - name: Verify
         run: |
@@ -37,5 +55,5 @@ jobs:
           git config user.name 'NAWAF HQ Automation'
           git config user.email 'nawaf-hq@users.noreply.github.com'
           git add server.ts
-          git commit -m 'Handle free-runtime cold starts truthfully'
+          git commit -m 'Retry sleeping runtime health checks'
           git push origin HEAD:main
