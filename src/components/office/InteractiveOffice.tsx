@@ -8,8 +8,6 @@ import {
   RotateCcw, 
   ZoomIn, 
   ZoomOut, 
-  Sparkles,
-  Zap,
   Crown,
   Users,
   Layers,
@@ -130,8 +128,7 @@ export const InteractiveOffice: React.FC<InteractiveOfficeProps> = () => {
     setSelectedEmployee,
     setIsCeoCommandOpen,
     setIsMeetingModalOpen,
-    meetingSession,
-    triggerSimulatedCollaboration
+    meetingSession
   } = useCompany();
 
   const mountRef = useRef<HTMLDivElement>(null);
@@ -881,11 +878,17 @@ export const InteractiveOffice: React.FC<InteractiveOfficeProps> = () => {
             item.rightArm.rotation.x = 0.1;
             item.head.rotation.x = -0.15; // looking up towards CEO
             item.head.rotation.y = Math.sin(time * 1.2) * 0.05;
-          } else {
-            // Standard WORKING at desk: typing motions
+          } else if (item.state === 'WORKING' || item.state === 'يعمل الآن' || item.state === 'يطور' || item.state === 'يصمم') {
+            // Animate work gestures only when the recorded state says the employee is working.
             item.leftArm.rotation.x = 0.7 + Math.sin(time * 6.0 + item.animOffset) * 0.12;
             item.rightArm.rotation.x = 0.7 + Math.cos(time * 6.0 + item.animOffset) * 0.12;
-            item.head.rotation.x = 0.2; // looking down at screen
+            item.head.rotation.x = 0.2;
+          } else {
+            // READY/unknown states stay visually neutral; do not imply work that did not happen.
+            item.leftArm.rotation.x = 0.05;
+            item.rightArm.rotation.x = 0.05;
+            item.head.rotation.x = 0;
+            item.head.rotation.y = 0;
           }
         }
 
@@ -999,7 +1002,7 @@ export const InteractiveOffice: React.FC<InteractiveOfficeProps> = () => {
             return;
           }
           if (curr.userData?.isLoungeBar) {
-            triggerSimulatedCollaboration();
+            focusOnZone('lounge');
             return;
           }
           curr = curr.parent;
@@ -1155,9 +1158,9 @@ export const InteractiveOffice: React.FC<InteractiveOfficeProps> = () => {
       {/* 1. Header Overlay: Status & Zone Navigation Pills */}
       <div className="absolute top-4 left-4 right-4 z-20 flex flex-wrap items-center justify-between gap-3 pointer-events-auto">
         
-        {/* Left: HQ Identity & Live Heartbeat */}
+        {/* Left: HQ Identity */}
         <div className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-white/10 shadow-2xl">
-          <span className="flex h-2.5 w-2.5 rounded-full bg-cyan-400 animate-ping"></span>
+          <span className="flex h-2.5 w-2.5 rounded-full bg-cyan-400/60"></span>
           <span className="text-xs font-bold text-white flex items-center gap-2">
             <span>مقر شركة نواف الذكية</span>
             <span className="text-slate-500">•</span>
@@ -1244,14 +1247,6 @@ export const InteractiveOffice: React.FC<InteractiveOfficeProps> = () => {
 
         {/* Right: Camera Zoom & Fullscreen Controls */}
         <div className="flex items-center gap-1.5">
-          <button
-            onClick={triggerSimulatedCollaboration}
-            title="نبضة تفاعل وتعاون بين الروبوتات"
-            className="p-2 rounded-xl bg-slate-950/85 hover:bg-slate-900 text-purple-300 border border-purple-500/30 transition-all text-xs flex items-center gap-1.5 px-3"
-          >
-            <Zap className="w-3.5 h-3.5 text-purple-400" />
-            <span className="hidden sm:inline">نبضة تفاعل</span>
-          </button>
 
           <button
             onClick={() => zoomCamera(-6)}
@@ -1313,7 +1308,7 @@ export const InteractiveOffice: React.FC<InteractiveOfficeProps> = () => {
                   } else if (zone.type === 'boardroom') {
                     setIsMeetingModalOpen(true);
                   } else if (zone.type === 'lounge') {
-                    triggerSimulatedCollaboration();
+                    focusOnZone('lounge');
                   } else if (zone.deptId) {
                     const dept = departments.find(d => d.id === zone.deptId);
                     if (dept) setSelectedDepartment(dept);
@@ -1372,7 +1367,7 @@ export const InteractiveOffice: React.FC<InteractiveOfficeProps> = () => {
         
         {/* Team Presence Strip */}
         <div className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-white/10 shadow-xl overflow-x-auto">
-          <span className="text-[11px] text-slate-400 font-medium ml-1 shrink-0">حضور الفريق:</span>
+          <span className="text-[11px] text-slate-400 font-medium ml-1 shrink-0">حالة الفريق:</span>
           {employees.slice(0, 8).map(emp => (
             <button
               key={emp.id}
@@ -1383,9 +1378,13 @@ export const InteractiveOffice: React.FC<InteractiveOfficeProps> = () => {
               <span className="text-lg">{emp.avatar}</span>
               <span 
                 className={`absolute bottom-0 right-0 w-2 h-2 rounded-full border border-slate-950 ${
-                  emp.status === 'ينتظر قرارك' || emp.status === 'WAITING_FOR_NAWAF' 
-                    ? 'bg-amber-400 animate-ping' 
-                    : (emp.status === 'MEETING' ? 'bg-cyan-400' : 'bg-emerald-400')
+                  emp.status === 'ينتظر قرارك' || emp.status === 'WAITING_FOR_NAWAF'
+                    ? 'bg-amber-400'
+                    : emp.status === 'MEETING'
+                      ? 'bg-cyan-400'
+                      : ['WORKING', 'يعمل الآن', 'يطور', 'يصمم'].includes(emp.status)
+                        ? 'bg-emerald-400'
+                        : 'bg-slate-500'
                 }`}
               />
             </button>
