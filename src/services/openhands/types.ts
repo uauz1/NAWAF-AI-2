@@ -26,6 +26,10 @@ export interface OpenHandsExecutionResult {
   taskTitle: string;
   startedAt: string;
   completedAt: string;
+  /** True only when the execution path that actually ran completed successfully. */
+  success?: boolean;
+  /** Distinguishes real OpenHands execution from truthful local verification fallback. */
+  source?: 'openhands-runtime' | 'local-verification';
   logs: OpenHandsLogEntry[];
   summary: string;
   filesInspected: string[];
