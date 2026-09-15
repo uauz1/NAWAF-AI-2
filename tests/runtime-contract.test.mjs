@@ -8,13 +8,7 @@ async function read(path) {
 
 test('server does not hardcode fake project task state', async () => {
   const server = await read('server.ts');
-  const forbidden = [
-    'تطوير غرف اللعب',
-    'إعداد 12 نمط',
-    'تدقيق نصوص التفسير الميسر',
-    'تصميم شاشات إحصائيات الختمة الشهرية',
-    'verifiedOnDisk: true,\n            project',
-  ];
+  const forbidden = ['تطوير غرف اللعب','إعداد 12 نمط','تدقيق نصوص التفسير الميسر','تصميم شاشات إحصائيات الختمة الشهرية','verifiedOnDisk: true,\n            project'];
   for (const marker of forbidden) assert.equal(server.includes(marker), false, `fake project marker still present: ${marker}`);
 });
 
@@ -116,6 +110,22 @@ test('OpenHands results require verified checks before runtime success', async (
   assert.match(engine, /const verificationPassed = output\?\.verificationPassed === true/);
   assert.match(engine, /success: verificationPassed, source: 'openhands-runtime'/);
   assert.match(engine, /success: localSuccess, source: 'local-verification'/);
+});
+
+test('arbitrary shell command routes remain disabled', async () => {
+  const server = await read('server.ts');
+  const router = await read('src/services/tools/toolRouter.ts');
+  const adapter = await read('src/services/openhands/adapter.ts');
+  assert.match(server, /Arbitrary shell execution is disabled/);
+  assert.equal(router.includes("| 'run_command'"), false);
+  assert.equal(adapter.includes('runCommand('), false);
+});
+
+test('unverified OpenHands output cannot become an approval-ready success', async () => {
+  const execution = await read('src/services/execution/executionAdapter.ts');
+  assert.match(execution, /runtimeStatus === 'REVIEW_REQUIRED'/);
+  assert.match(execution, /ok: false/);
+  assert.match(execution, /الفحوص الموثقة لم تنجح بالكامل/);
 });
 
 test('truth migration resets operational state and employee productivity', async () => {
