@@ -54,3 +54,24 @@ test('frontend decision center does not claim automatic GitHub push without back
   assert.match(ui, /GitHub/);
   assert.equal(ui.includes('تم الاعتماد والتطبيق على GitHub —'), false);
 });
+
+test('company state cannot silently re-enable simulation or fabricated metrics', async () => {
+  const context = await read('src/context/CompanyContext.tsx');
+  assert.match(context, /const isAutoSimulationActive = false/);
+  assert.equal(context.includes('setTimeout('), false, 'random delayed employee simulation must stay removed');
+  assert.equal(context.includes('productivityRate: 87'), false);
+  assert.equal(context.includes('completedTasks: 3'), false);
+  assert.equal(context.includes('inProgressTasks: 5'), false);
+  assert.equal(context.includes("estimatedCost: '0$ (مجاني)'"), false);
+  assert.equal(context.includes("estimatedTime: 'فوري'"), false);
+  assert.match(context, /productivityRate: total > 0 \? Math\.round\(\(completed \/ total\) \* 100\) : 0/);
+});
+
+test('task progress is evidence-driven instead of fixed fake percentages', async () => {
+  const context = await read('src/context/CompanyContext.tsx');
+  assert.equal(context.includes('progress: 65'), false);
+  assert.equal(context.includes('progress: 30'), false);
+  assert.equal(context.includes('progress: 20'), false);
+  assert.equal(context.includes('اكتملت الخطوة بنجاح وتم التحقق من الجودة'), false);
+  assert.match(context, /newStatus === 'completed' \? 100 : t\.progress/);
+});
