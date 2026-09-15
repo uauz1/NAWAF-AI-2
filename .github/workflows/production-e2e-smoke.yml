@@ -1,4 +1,5 @@
 name: One-time production E2E smoke
+# rerun after cold-start fix
 
 on:
   push:
