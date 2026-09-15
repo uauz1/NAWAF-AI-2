@@ -15,9 +15,7 @@ test('server does not hardcode fake project task state', async () => {
     'تصميم شاشات إحصائيات الختمة الشهرية',
     'verifiedOnDisk: true,\n            project',
   ];
-  for (const marker of forbidden) {
-    assert.equal(server.includes(marker), false, `fake project marker still present: ${marker}`);
-  }
+  for (const marker of forbidden) assert.equal(server.includes(marker), false, `fake project marker still present: ${marker}`);
 });
 
 test('real execution routes are present and guarded', async () => {
@@ -30,13 +28,24 @@ test('real execution routes are present and guarded', async () => {
   assert.match(server, /NOT_CONFIGURED/);
 });
 
-test('runtime uses official CrewAI and OpenHands packages', async () => {
+test('runtime uses official CrewAI and hardened OpenHands file tools', async () => {
   const runtime = await read('runtime/main.py');
   assert.match(runtime, /from crewai import Agent, Crew, LLM, Process, Task/);
   assert.match(runtime, /from openhands\.sdk import Agent, Conversation, LLM, Tool/);
-  assert.match(runtime, /from openhands\.tools\.terminal import TerminalTool/);
-  assert.match(runtime, /git', 'diff'/);
-  assert.match(runtime, /workspaceMode': 'ephemeral-clone'/);
+  assert.match(runtime, /from openhands\.tools\.file_editor import FileEditorTool/);
+  assert.match(runtime, /from openhands\.tools\.task_tracker import TaskTrackerTool/);
+  assert.equal(runtime.includes('from openhands.tools.terminal import TerminalTool'), false);
+  assert.match(runtime, /workspaceMode': 'ephemeral-clone-file-tools-only'/);
+  assert.match(runtime, /verificationPassed/);
+  assert.match(runtime, /EXECUTION_SEMAPHORE = asyncio\.Semaphore\(1\)/);
+  assert.match(runtime, /MAX_EXECUTIONS_PER_MINUTE = 8/);
+  assert.match(runtime, /MAX_INSTRUCTION_CHARS = 12000/);
+});
+
+test('runtime trusted verification includes lint tests and build', async () => {
+  const runtime = await read('runtime/main.py');
+  assert.match(runtime, /scripts = \['lint', 'test'\] \+ \(\['build'\]/);
+  assert.match(runtime, /verify_workspace\(workspace, include_build=True\)/);
 });
 
 test('OpenHands proposals cannot silently push before approval', async () => {
@@ -58,7 +67,7 @@ test('frontend decision center does not claim automatic GitHub push without back
 test('company state cannot silently re-enable simulation or fabricated metrics', async () => {
   const context = await read('src/context/CompanyContext.tsx');
   assert.match(context, /const isAutoSimulationActive = false/);
-  assert.equal(context.includes('setTimeout('), false, 'random delayed employee simulation must stay removed');
+  assert.equal(context.includes('setTimeout('), false);
   assert.equal(context.includes('productivityRate: 87'), false);
   assert.equal(context.includes('completedTasks: 3'), false);
   assert.equal(context.includes('inProgressTasks: 5'), false);
@@ -81,45 +90,32 @@ test('task completion requires evidence and project progress is derived', async 
 
 test('seed data contains identity only, not fake operational history', async () => {
   const initial = await read('src/data/initialData.ts');
-  const forbidden = [
-    'progress: 82',
-    'progress: 68',
-    'tasksCompletedCount: 42',
-    'مطبق بنجاح',
-    'منذ 35 دقيقة',
-    'زمن الاستجابة أقل من 35ms',
-    'إطلاق نظام الغرف اللحظية',
-    'اكتملت مراجعة 14 شاشة',
-  ];
-  for (const marker of forbidden) {
-    assert.equal(initial.includes(marker), false, `seeded operational claim still present: ${marker}`);
-  }
+  const forbidden = ['progress: 82','progress: 68','tasksCompletedCount: 42','مطبق بنجاح','منذ 35 دقيقة','زمن الاستجابة أقل من 35ms','إطلاق نظام الغرف اللحظية','اكتملت مراجعة 14 شاشة'];
+  for (const marker of forbidden) assert.equal(initial.includes(marker), false, `seeded operational claim still present: ${marker}`);
   assert.match(initial, /export const INITIAL_DECISIONS: Decision\[\] = \[\]/);
   assert.match(initial, /export const INITIAL_ACTIVITIES: ActivityEvent\[\] = \[\]/);
   assert.match(initial, /export const INITIAL_REPORTS: CompanyReport\[\] = \[\]/);
   assert.match(initial, /export const INITIAL_PLANS: ExecutionPlan\[\] = \[\]/);
 });
 
-test('CrewAI agent catalog advertises only implemented execution paths', async () => {
+test('agent catalog advertises no arbitrary shell or pseudo tools', async () => {
   const agents = await read('src/services/crewai/agents.ts');
-  assert.equal(agents.includes('webrtc_network_inspector'), false);
-  assert.equal(agents.includes('quranic_text_diff_verifier'), false);
-  assert.equal(agents.includes('audio_timestamp_matcher'), false);
-  assert.equal(agents.includes('cost_tracker_zero_enforcer'), false);
+  for (const marker of ['webrtc_network_inspector','quranic_text_diff_verifier','audio_timestamp_matcher','cost_tracker_zero_enforcer','openhands_terminal','openhands:exec_cmd']) {
+    assert.equal(agents.includes(marker), false, `unsupported agent capability still advertised: ${marker}`);
+  }
   assert.equal(agents.includes('isZeroCost: true'), false);
-  assert.match(agents, /openhands_terminal/);
   assert.match(agents, /openhands_test_runner/);
   assert.match(agents, /crew_delegator/);
 });
 
-test('OpenHands results expose verified outcome and execution source', async () => {
+test('OpenHands results require verified checks before runtime success', async () => {
   const engine = await read('src/services/openhands/engine.ts');
   const types = await read('src/services/openhands/types.ts');
   assert.match(types, /success\?: boolean/);
   assert.match(types, /source\?: 'openhands-runtime' \| 'local-verification'/);
-  assert.match(engine, /success: true, source: 'openhands-runtime'/);
+  assert.match(engine, /const verificationPassed = output\?\.verificationPassed === true/);
+  assert.match(engine, /success: verificationPassed, source: 'openhands-runtime'/);
   assert.match(engine, /success: localSuccess, source: 'local-verification'/);
-  assert.equal(engine.includes("summary: output?.summary || 'تم التنفيذ عبر OpenHands"), false);
 });
 
 test('truth migration resets operational state and employee productivity', async () => {
