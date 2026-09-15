@@ -19,5 +19,6 @@ jobs:
           python-version: '3.12'
       - run: npm install --no-audit --no-fund
       - run: npm run lint
+      - run: npm test
       - run: npm run build
       - run: python -m py_compile runtime/main.py
