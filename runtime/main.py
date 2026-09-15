@@ -18,7 +18,7 @@ OPENHANDS_AVAILABLE = importlib.util.find_spec('openhands.sdk') is not None and 
 
 app = FastAPI(title='NAWAF HQ Agent Runtime', version='1.5.0')
 
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini/gemini-2.5-flash').strip()
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini/gemini-3.6-flash').strip()
 DEFAULT_REPO_URL = os.getenv('DEFAULT_REPO_URL', 'https://github.com/uauz1/NAWAF-AI-2').strip()
 ALLOWED_GITHUB_OWNER = os.getenv('ALLOWED_GITHUB_OWNER', 'uauz1').strip()
 MAX_INSTRUCTION_CHARS = 12000

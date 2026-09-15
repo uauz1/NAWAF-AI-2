@@ -137,7 +137,7 @@ USER MESSAGE:
 ${userMessage}
 `;
       const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
+      const response = await ai.models.generateContent({ model: 'gemini-3.6-flash', contents: prompt });
       const text = String((response as any).text || '').trim();
       if (!text) return res.status(502).json({ ok: false, error: 'Gemini returned an empty response.' });
       return res.json({ ok: true, text });
