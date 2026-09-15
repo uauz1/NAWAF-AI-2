@@ -71,6 +71,15 @@ export class ExecutionAdapter {
       });
 
       const data = await res.json();
+      const isOpenHandsAction = ['modify_code', 'execute_code', 'modify_file'].includes(action);
+      const runtimeStatus = data?.output?.status;
+      if (isOpenHandsAction && data?.ok === true && runtimeStatus === 'REVIEW_REQUIRED') {
+        return {
+          ...data,
+          ok: false,
+          error: 'OpenHands أنشأ نتيجة لكن الفحوص الموثقة لم تنجح بالكامل؛ لن تُعامل كتغيير جاهز للاعتماد.',
+        };
+      }
       return data;
     } catch (err: any) {
       return {
