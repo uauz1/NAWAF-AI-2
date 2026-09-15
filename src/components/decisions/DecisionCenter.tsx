@@ -1,12 +1,17 @@
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, XCircle, Edit3, Lock, Clock, GitCommitHorizontal, AlertCircle } from 'lucide-react';
+import { CheckCircle2, XCircle, Edit3, Lock, Clock, GitCommitHorizontal, Info } from 'lucide-react';
 import { useCompany } from '../../context/CompanyContext';
 import { Decision } from '../../types';
 
 const PROPOSAL_KEY_PREFIX = 'nawaf_hq_execution_proposal_';
+const APPROVED_PROPOSAL_KEY_PREFIX = 'nawaf_hq_approved_execution_proposal_';
 
 function proposalKey(id: string) {
   return `${PROPOSAL_KEY_PREFIX}${id}`;
+}
+
+function approvedProposalKey(id: string) {
+  return `${APPROVED_PROPOSAL_KEY_PREFIX}${id}`;
 }
 
 function getProposal(id: string) {
@@ -16,6 +21,15 @@ function getProposal(id: string) {
   } catch {
     return null;
   }
+}
+
+function preserveApprovedProposal(id: string, proposal: any) {
+  localStorage.setItem(approvedProposalKey(id), JSON.stringify({
+    ...proposal,
+    decisionId: id,
+    approvedAt: new Date().toISOString(),
+    approvalMode: 'connected-github-executor',
+  }));
 }
 
 export const DecisionCenter: React.FC = () => {
@@ -33,8 +47,7 @@ export const DecisionCenter: React.FC = () => {
   const [modifyNote, setModifyNote] = useState('');
   const [rejectNote, setRejectNote] = useState('');
   const [actionType, setActionType] = useState<'modify' | 'reject' | null>(null);
-  const [applyingDecisionId, setApplyingDecisionId] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const filteredDecisions = useMemo(() => decisions.filter(d => {
     if (activeFilter === 'all') return true;
@@ -49,7 +62,7 @@ export const DecisionCenter: React.FC = () => {
     setActionType(type);
     setModifyNote('');
     setRejectNote('');
-    setActionError(null);
+    setNotice(null);
   };
 
   const handleConfirmAction = () => {
@@ -57,16 +70,18 @@ export const DecisionCenter: React.FC = () => {
     if (actionType === 'modify') {
       modifyDecision(modalDecision.id, modifyNote || 'توجيهات تعديل من الرئيس التنفيذي');
       localStorage.removeItem(proposalKey(modalDecision.id));
+      localStorage.removeItem(approvedProposalKey(modalDecision.id));
     } else if (actionType === 'reject') {
       rejectDecision(modalDecision.id, rejectNote || 'مرفوض من الرئيس التنفيذي');
       localStorage.removeItem(proposalKey(modalDecision.id));
+      localStorage.removeItem(approvedProposalKey(modalDecision.id));
     }
     setModalDecision(null);
     setActionType(null);
   };
 
-  const handleApproveDecision = async (decision: Decision) => {
-    setActionError(null);
+  const handleApproveDecision = (decision: Decision) => {
+    setNotice(null);
     const proposal = getProposal(decision.id);
 
     if (!proposal) {
@@ -74,29 +89,10 @@ export const DecisionCenter: React.FC = () => {
       return;
     }
 
-    setApplyingDecisionId(decision.id);
-    try {
-      const response = await fetch('/api/apply-change', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decisionId: decision.id, proposal }),
-      });
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok || data?.ok !== true) {
-        const message = data?.error || 'تعذر تطبيق التغيير على GitHub.';
-        setActionError(message);
-        return;
-      }
-
-      const commitSha = String(data.commitSha || '').slice(0, 12);
-      approveDecision(decision.id, commitSha ? `تم الاعتماد والتطبيق على GitHub — ${commitSha}` : 'تم الاعتماد والتطبيق على GitHub');
-      localStorage.removeItem(proposalKey(decision.id));
-    } catch (error: any) {
-      setActionError(error?.message || 'فشل الاتصال بمسار تطبيق GitHub.');
-    } finally {
-      setApplyingDecisionId(null);
-    }
+    preserveApprovedProposal(decision.id, proposal);
+    localStorage.removeItem(proposalKey(decision.id));
+    approveDecision(decision.id, 'تم اعتماد تغيير OpenHands وحفظه للتطبيق عبر منفذ GitHub المتصل. لم يتم الادعاء بأنه دُفع إلى GitHub بعد.');
+    setNotice('تم اعتماد التغيير وحفظ الـdiff الحقيقي. تطبيقه على GitHub يتم عبر منفذ GitHub المتصل بدون الحاجة إلى GITHUB_TOKEN داخل التطبيق.');
   };
 
   return (
@@ -114,7 +110,7 @@ export const DecisionCenter: React.FC = () => {
               )}
             </div>
             <p className="text-xs text-slate-400 mt-2 max-w-2xl">
-              اعتماد تغييرات OpenHands هنا يطبق الـdiff الحقيقي فقط بعد فحص التعارضات والـlint والـbuild. لا يوجد دفع تلقائي قبل موافقتك.
+              OpenHands يجهز التغيير الحقيقي داخل نسخة معزولة. موافقتك تحفظ الـdiff المعتمد بدون ادعاء أنه نُشر، ثم يُطبق عبر منفذ GitHub المتصل.
             </p>
           </div>
 
@@ -157,10 +153,10 @@ export const DecisionCenter: React.FC = () => {
         </div>
       </div>
 
-      {actionError && (
-        <div className="rounded-xl border border-rose-500/30 bg-rose-950/30 text-rose-200 p-3 text-xs flex items-start gap-2">
-          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{actionError}</span>
+      {notice && (
+        <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/25 text-cyan-100 p-3 text-xs flex items-start gap-2">
+          <Info className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{notice}</span>
         </div>
       )}
 
@@ -173,7 +169,6 @@ export const DecisionCenter: React.FC = () => {
         ) : filteredDecisions.map(decision => {
           const isWaiting = decision.status === 'waiting';
           const proposal = getProposal(decision.id);
-          const applying = applyingDecisionId === decision.id;
           return (
             <div key={decision.id} id={`decision-${decision.id}`} className="rounded-2xl glass-panel border border-white/10 p-5">
               <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -201,12 +196,11 @@ export const DecisionCenter: React.FC = () => {
                   <button onClick={() => handleOpenActionModal(decision, 'reject')} className="px-3 py-2 rounded-xl text-xs font-bold text-rose-300 bg-rose-950/30 border border-rose-500/20 flex items-center gap-1.5"><XCircle className="w-4 h-4" /> رفض</button>
                   <button onClick={() => handleOpenActionModal(decision, 'modify')} className="px-3 py-2 rounded-xl text-xs font-bold text-amber-300 bg-amber-950/30 border border-amber-500/20 flex items-center gap-1.5"><Edit3 className="w-4 h-4" /> طلب تعديل</button>
                   <button
-                    disabled={applying}
-                    onClick={() => void handleApproveDecision(decision)}
-                    className="px-4 py-2 rounded-xl text-xs font-black text-slate-950 bg-emerald-400 hover:bg-emerald-300 disabled:opacity-50 flex items-center gap-1.5"
+                    onClick={() => handleApproveDecision(decision)}
+                    className="px-4 py-2 rounded-xl text-xs font-black text-slate-950 bg-emerald-400 hover:bg-emerald-300 flex items-center gap-1.5"
                   >
                     <CheckCircle2 className="w-4 h-4" />
-                    {applying ? 'جاري الفحص والتطبيق...' : proposal ? 'اعتماد وتطبيق على GitHub' : 'اعتماد القرار'}
+                    {proposal ? 'اعتماد التغيير' : 'اعتماد القرار'}
                   </button>
                 </div>
               ) : (
