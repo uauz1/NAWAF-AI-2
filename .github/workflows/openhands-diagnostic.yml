@@ -1,0 +1,23 @@
+name: OpenHands production diagnostic
+
+on:
+  push:
+    paths:
+      - '.github/workflows/openhands-diagnostic.yml'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Call production OpenHands endpoint
+        run: |
+          set -euo pipefail
+          BASE='https://nawaf-hq-live-v2.onrender.com'
+          INSTRUCTION='Create a new file docs/production-e2e-smoke.txt containing exactly: NAWAF HQ production E2E smoke passed. Do not modify any other file.'
+          jq -n --arg instruction "$INSTRUCTION" '{action:"modify_code",params:{instruction:$instruction,repoUrl:"https://github.com/uauz1/NAWAF-AI-2"}}' >/tmp/request.json
+          STATUS=$(curl -sS -o /tmp/body.json -w '%{http_code}' -X POST "$BASE/api/execute" \
+            -H 'Content-Type: application/json' \
+            --data-binary @/tmp/request.json)
+          echo "HTTP_STATUS=$STATUS"
+          cat /tmp/body.json
