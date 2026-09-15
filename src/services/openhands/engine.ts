@@ -36,7 +36,6 @@ export class OpenHandsEngine {
 
     const state = await adapter.checkStatus();
 
-    // If a real OpenHands runtime exists, send the technical job to it.
     if (state.status === 'CONNECTED') {
       const started = performance.now();
       try {
@@ -57,24 +56,29 @@ export class OpenHandsEngine {
         const result = await response.json();
         const durationMs = Math.round(performance.now() - started);
         if (!response.ok || !result?.ok) throw new Error(result?.error || `HTTP ${response.status}`);
-        const output = result.output;
+        const output = result.output || {};
         const realFiles = Array.isArray(output?.filesInspected) ? output.filesInspected : (Array.isArray(output?.files) ? output.files : []);
         filesInspected.push(...realFiles);
+        const verificationPassed = output?.verificationPassed === true;
+        const checks = Array.isArray(output?.checks) ? output.checks : [];
+        const failedChecks = checks.filter((check: any) => check?.ok === false).length;
+        const passedChecks = checks.filter((check: any) => check?.ok === true).length;
         logs.push({
           id: `${sessionId}-openhands`, timestamp: nowAr(), action: 'cmd_run',
-          observation: stringify(output), exitCode: 0, durationMs
+          observation: stringify(output), exitCode: verificationPassed ? 0 : 1, durationMs, isError: !verificationPassed
         });
         return {
           sessionId, agentId: params.agentId, agentName: params.agentName,
           projectId: params.projectId, taskTitle: params.taskTitle,
-          startedAt, completedAt: nowAr(), success: true, source: 'openhands-runtime', logs, filesInspected,
-          summary: output?.summary || 'اكتمل التنفيذ عبر OpenHands المتصل فعلياً وتم استلام النتيجة من الخادم.',
+          startedAt, completedAt: nowAr(), success: verificationPassed, source: 'openhands-runtime', logs, filesInspected,
+          summary: output?.summary || (verificationPassed
+            ? 'اكتمل تنفيذ OpenHands واجتازت الفحوص الموثقة.'
+            : 'اكتمل تشغيل OpenHands لكن الفحوص لم تثبت نجاح النتيجة؛ يلزم مراجعة قبل اعتبار المهمة ناجحة.'),
           metrics: {
-            testsPassed: Number(output?.metrics?.testsPassed ?? output?.testsPassed ?? 0) || 0,
-            testsFailed: Number(output?.metrics?.testsFailed ?? output?.testsFailed ?? 0) || 0,
-            latencyMs: Number(output?.metrics?.latencyMs ?? output?.latencyMs) || undefined,
-            bundleSizeMb: Number(output?.metrics?.bundleSizeMb ?? output?.bundleSizeMb) || undefined,
-            zeroCostVerified: Boolean(output?.metrics?.zeroCostVerified ?? output?.zeroCostVerified ?? false),
+            testsPassed: passedChecks,
+            testsFailed: failedChecks,
+            latencyMs: Number(result?.durationMs) || undefined,
+            zeroCostVerified: false,
           },
         };
       } catch (error: any) {
@@ -86,7 +90,6 @@ export class OpenHandsEngine {
       }
     }
 
-    // Honest local fallback: perform only checks the local backend can really execute.
     const inspection = await adapter.inspectRepository();
     if (inspection.success) {
       filesInspected.push(...(inspection.files || []));
