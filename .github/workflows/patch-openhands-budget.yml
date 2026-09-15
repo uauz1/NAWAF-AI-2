@@ -1,0 +1,47 @@
+name: Bound OpenHands execution time
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-openhands-budget.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bound agent iterations for synchronous production requests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('runtime/main.py')
+          s = p.read_text()
+          old = "conversation = Conversation(agent=agent, workspace=workspace)"
+          new = "conversation = Conversation(agent=agent, workspace=workspace, max_iteration_per_run=6)"
+          if old not in s:
+              raise SystemExit('Conversation constructor marker not found')
+          s = s.replace(old, new, 1)
+          old_prompt = "'If the task cannot be completed with the available file tools, stop and explain the exact blocker.\\n\\nTASK:\\n' + instruction"
+          new_prompt = "'You have a strict six-step execution budget because this runs behind a synchronous production gateway. Prioritize the requested file edits immediately; avoid unnecessary exploration or narration. If the task cannot be completed with the available file tools, stop and explain the exact blocker.\\n\\nTASK:\\n' + instruction"
+          if old_prompt not in s:
+              raise SystemExit('OpenHands prompt marker not found')
+          s = s.replace(old_prompt, new_prompt, 1)
+          p.write_text(s)
+          PY
+      - name: Verify
+        run: |
+          npm install --no-audit --no-fund
+          npm run lint
+          npm test
+          npm run build
+          python -m py_compile runtime/main.py
+      - name: Commit patch
+        run: |
+          git config user.name 'NAWAF HQ Automation'
+          git config user.email 'nawaf-hq@users.noreply.github.com'
+          git add runtime/main.py
+          git commit -m 'Bound OpenHands production execution budget'
+          git push origin HEAD:main
