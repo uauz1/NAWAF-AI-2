@@ -1,5 +1,5 @@
 name: One-time production E2E smoke
-# rerun after runtime retry fix
+# rerun after Gemini 3.6 migration
 
 on:
   push:
