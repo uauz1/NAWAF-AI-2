@@ -238,12 +238,12 @@ def execute_openhands(params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
                 Tool(name=TaskTrackerTool.name),
             ],
         )
-        conversation = Conversation(agent=agent, workspace=workspace)
+        conversation = Conversation(agent=agent, workspace=workspace, max_iteration_per_run=6)
         message = (
             'You are the real technical file executor for NAWAF HQ. Work only inside the provided repository workspace. '
             'Inspect and edit repository files as needed using the available file tools. Do not use or request shell access. '
             'Do not fabricate success. Do not commit or push. Verification commands are executed separately by the trusted runtime after you finish. '
-            'If the task cannot be completed with the available file tools, stop and explain the exact blocker.\n\nTASK:\n' + instruction
+            'You have a strict six-step execution budget because this runs behind a synchronous production gateway. Prioritize the requested file edits immediately; avoid unnecessary exploration or narration. If the task cannot be completed with the available file tools, stop and explain the exact blocker.\n\nTASK:\n' + instruction
         )
         conversation.send_message(message)
         conversation.run()
