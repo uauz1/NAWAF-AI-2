@@ -1,0 +1,21 @@
+name: Gemini production diagnostic
+
+on:
+  push:
+    paths:
+      - '.github/workflows/gemini-diagnostic.yml'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call production agent endpoint
+        run: |
+          set -euo pipefail
+          BASE='https://nawaf-hq-live-v2.onrender.com'
+          STATUS=$(curl -sS -o /tmp/body.json -w '%{http_code}' -X POST "$BASE/api/agent/respond" \
+            -H 'Content-Type: application/json' \
+            --data '{"userMessage":"اختبار اتصال فقط. رد بكلمة جاهز.","context":{"employee":{"name":"فهد","position":"مهندس برمجيات"},"verifiedTest":true}}')
+          echo "HTTP_STATUS=$STATUS"
+          cat /tmp/body.json
+          test "$STATUS" -ge 200 -a "$STATUS" -lt 600
