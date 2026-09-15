@@ -13,12 +13,17 @@ const DEFAULT_RUNTIME_API_URL = 'https://nawaf-hq-crewai-runtime.onrender.com';
 
 async function pingEngine(url?: string | null): Promise<EngineStatus> {
   if (!url) return 'NOT_CONFIGURED';
-  try {
-    const response = await fetch(`${url.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(70000) });
-    return response.ok ? 'CONNECTED' : 'ERROR';
-  } catch {
-    return 'ERROR';
+  const endpoint = `${url.replace(/\/$/, '')}/health`;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const response = await fetch(endpoint, { signal: AbortSignal.timeout(15000) });
+      if (response.ok) return 'CONNECTED';
+    } catch {
+      // Free runtimes may be waking from idle; retry below.
+    }
+    if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 5000));
   }
+  return 'ERROR';
 }
 
 async function readPackageJson() {
