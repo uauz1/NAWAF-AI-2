@@ -217,6 +217,7 @@ function cleanEmployees(): Employee[] {
     status: 'READY' as const,
     currentTask: '',
     taskProgress: 0,
+    productivity: 0,
     recentWork: [],
     tasksCompletedCount: 0,
     collaborationHistory: [],
@@ -276,7 +277,7 @@ export const CompanyProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isMeetingModalOpen, setIsMeetingModalOpen] = useState(false);
   const [focusedZone, setFocusedZone] = useState<string | null>(null);
   const [controlLevel, setControlLevel] = useState<CEOControlLevel>('requires_approval');
-  const [isCompanyOperating, setIsCompanyOperating] = useState(true);
+  const [isCompanyOperating, setIsCompanyOperating] = useState(false);
   const [meetingSession, setMeetingSession] = useState<MeetingSession | null>(() => readStored('meeting', null));
 
   // Simulation is permanently disabled. Kept only for backwards UI compatibility.
@@ -418,10 +419,9 @@ export const CompanyProvider: React.FC<{ children: React.ReactNode }> = ({ child
       status: 'PLANNING',
       team: teamEmployees.map(e => ({ id: e.id, name: e.name, role: e.position, avatar: e.avatar })),
       steps,
-      estimatedComplexity: 'متوسط',
       whatRequiresApproval: 'اعتماد الخطة فقط. أي تكلفة أو إجراء خارجي حساس يحتاج موافقة منفصلة.',
       summary: `مسودة تنفيذ للهدف: «${goal}». لا تُعد أي خطوة منجزة قبل وصول نتيجة فعلية من الأداة أو الموظف المسؤول.`,
-      zeroCostGuarantee: true,
+      zeroCostGuarantee: false,
     };
     setPlans(prev => [newPlan, ...prev]);
     setSelectedPlan(newPlan);
@@ -469,12 +469,16 @@ export const CompanyProvider: React.FC<{ children: React.ReactNode }> = ({ child
     void (async () => {
       const orchestrator = CrewOrchestrator.getInstance();
       const state = await orchestrator.checkStatus();
-      if (state.status === 'CONNECTED') {
-        const result = await orchestrator.runWorkflow(plan.id, approved);
-        if (result.success) {
-          setPlans(prev => prev.map(p => p.id === plan.id ? { ...p, status: 'IN_PROGRESS' } : p));
-          addActivity({ actor: 'CrewAI', actorAvatar: '🧠', actorRole: 'محرك التنسيق', department: 'العمليات', actionText: `بدأ تنسيق الخطة «${plan.title}» عبر CrewAI المتصل فعلياً.`, projectId: plan.projectId, type: 'system', isAutonomous: true });
-        }
+      if (state.status !== 'CONNECTED') {
+        addActivity({ actor: 'CrewAI', actorAvatar: '🧠', actorRole: 'محرك التنسيق', department: 'العمليات', actionText: `لم يبدأ تنفيذ «${plan.title}»: CrewAI غير متصل أو غير متاح.`, projectId: plan.projectId, type: 'alert', isAutonomous: true });
+        return;
+      }
+      const result = await orchestrator.runWorkflow(plan.id, approved);
+      if (result.success) {
+        setPlans(prev => prev.map(p => p.id === plan.id ? { ...p, status: 'IN_PROGRESS' } : p));
+        addActivity({ actor: 'CrewAI', actorAvatar: '🧠', actorRole: 'محرك التنسيق', department: 'العمليات', actionText: `بدأ تنسيق الخطة «${plan.title}» عبر CrewAI المتصل فعلياً.`, projectId: plan.projectId, type: 'system', isAutonomous: true });
+      } else {
+        addActivity({ actor: 'CrewAI', actorAvatar: '🧠', actorRole: 'محرك التنسيق', department: 'العمليات', actionText: `تعذر بدء تنسيق «${plan.title}»: ${result.error || 'فشل التنفيذ بدون نتيجة نجاح.'}`, projectId: plan.projectId, type: 'alert', isAutonomous: true });
       }
     })();
 
@@ -502,26 +506,47 @@ export const CompanyProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setIsOpenHandsTerminalOpen(true);
     addActivity({
       actor: employee?.name || 'النظام', actorAvatar: employee?.avatar || '🤖', actorRole: employee?.position || 'تنفيذ', department: employee?.departmentName || 'الأنظمة',
-      actionText: result.summary, projectId: effective, type: result.logs.some(l => l.isError) ? 'alert' : 'milestone', isAutonomous: true,
+      actionText: result.summary,
+      projectId: effective,
+      type: result.success ? (result.source === 'openhands-runtime' ? 'milestone' : 'system') : 'alert',
+      isAutonomous: result.source === 'openhands-runtime',
     });
     return result;
   }, [employees, addActivity]);
 
   const updateTaskStatus = useCallback((taskId: string, newStatus: ProjectTask['status'], result?: string) => {
+    const hasCompletionEvidence = typeof result === 'string' && result.trim().length > 0;
+    const effectiveStatus: ProjectTask['status'] = newStatus === 'completed' && !hasCompletionEvidence ? 'reviewing' : newStatus;
     let planId: string | undefined;
     let stepId: string | undefined;
-    setProjects(prev => prev.map(p => ({ ...p, tasks: (p.tasks || []).map(t => {
-      if (t.id !== taskId) return t;
-      planId = t.planId; stepId = t.planStepId;
-      return { ...t, status: newStatus, result: result ?? t.result, progress: newStatus === 'completed' ? 100 : t.progress };
-    }) })));
+
+    setProjects(prev => prev.map(project => {
+      let matched = false;
+      const updatedTasks = (project.tasks || []).map(task => {
+        if (task.id !== taskId) return task;
+        matched = true;
+        planId = task.planId;
+        stepId = task.planStepId;
+        return {
+          ...task,
+          status: effectiveStatus,
+          result: result ?? task.result,
+          progress: effectiveStatus === 'completed' ? 100 : task.progress,
+        };
+      });
+      if (!matched) return project;
+      const totalProgress = updatedTasks.reduce((sum, task) => sum + (task.status === 'completed' ? 100 : Number(task.progress || 0)), 0);
+      const progress = updatedTasks.length ? Math.round(totalProgress / updatedTasks.length) : 0;
+      return { ...project, tasks: updatedTasks, progress };
+    }));
+
     if (planId && stepId) {
       setPlans(prev => prev.map(plan => {
         if (plan.id !== planId) return plan;
         const steps = plan.steps.map(step => step.id === stepId ? {
           ...step,
-          status: newStatus === 'completed' ? 'COMPLETED' as const : newStatus === 'blocked' ? 'BLOCKED' as const : newStatus === 'reviewing' ? 'REVIEWING' as const : newStatus === 'in_progress' ? 'WORKING' as const : step.status,
-          progress: newStatus === 'completed' ? 100 : step.progress,
+          status: effectiveStatus === 'completed' ? 'COMPLETED' as const : effectiveStatus === 'blocked' ? 'BLOCKED' as const : effectiveStatus === 'reviewing' ? 'REVIEWING' as const : effectiveStatus === 'in_progress' ? 'WORKING' as const : step.status,
+          progress: effectiveStatus === 'completed' ? 100 : step.progress,
           result: result ?? step.result,
         } : step);
         const done = steps.every(s => s.status === 'COMPLETED');
@@ -603,6 +628,12 @@ export const CompanyProvider: React.FC<{ children: React.ReactNode }> = ({ child
             id: createUniqueId('msg'), senderId: responder.id, senderName: responder.name, senderRole: responder.position, senderAvatar: responder.avatar,
             text: reply, timestamp: new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' }),
           }] } : prev);
+        }).catch((error: any) => {
+          setMeetingSession(prev => prev ? { ...prev, messages: [...prev.messages, {
+            id: createUniqueId('msg'), senderId: responder.id, senderName: responder.name, senderRole: responder.position, senderAvatar: responder.avatar,
+            text: `تعذر الحصول على رد موثق الآن: ${error?.message || 'محرك المحادثة غير متاح.'}`,
+            timestamp: new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' }),
+          }] } : prev);
         });
       }
     }
@@ -627,7 +658,7 @@ export const CompanyProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const addReport = useCallback((rep: Omit<CompanyReport, 'id' | 'createdAt'>) => setReports(prev => [{ ...rep, id: createUniqueId('rep'), createdAt: new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' }) }, ...prev]), []);
   const updateReportProgress = useCallback((id: string, progress: number, status?: ReportStatus) => {
-    setReports(prev => prev.map(r => r.id === id ? { ...r, progress: Math.max(0, Math.min(100, progress)), status: status || r.status, completedAt: progress >= 100 ? new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' }) : r.completedAt } : r));
+    setReports(prev => prev.map(r => r.id === id ? { ...r, progress: Math.max(0, Math.min(100, progress)), status: status || r.status, completedAt: progress >= 100 && status === 'مكتمل' ? new Date().toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' }) : r.completedAt } : r));
   }, []);
 
   const sendAdvisorMessage = useCallback((text: string) => {
@@ -677,14 +708,14 @@ export const CompanyProvider: React.FC<{ children: React.ReactNode }> = ({ child
       `${plans.filter(p => p.status === 'APPROVED' || p.status === 'IN_PROGRESS').length} خطة معتمدة أو جارية`,
       `${reports.filter(r => r.status === 'مكتمل').length} تقرير مكتمل`,
     ],
-    companyStatus: metrics.pendingDecisions || tasks.some(t => t.status === 'blocked') ? 'attention_needed' : 'optimal',
+    companyStatus: metrics.pendingDecisions || tasks.some(t => t.status === 'blocked') || tasks.length === 0 ? 'attention_needed' : 'optimal',
   }), [metrics, tasks, plans, reports]);
 
   const executeCEOCommand = useCallback(async (instruction: string) => {
     const plan = createExecutionPlan(instruction);
     return {
       success: true,
-      message: `تم تحويل توجيهك إلى خطة فعلية قابلة للاعتماد: «${plan.title}». لم يبدأ أي تنفيذ وهمي.`,
+      message: `تم تحويل توجيهك إلى مسودة خطة قابلة للاعتماد: «${plan.title}». لم يبدأ التنفيذ بعد ولم تُسجل أي نسبة إنجاز.`,
       assigneeName: plan.team[0]?.name || 'الفريق',
       taskTitle: plan.title,
       plan,
@@ -716,6 +747,7 @@ export const CompanyProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setSelectedProject(null);
     setSelectedDepartment(null);
     setSelectedReport(null);
+    setIsCompanyOperating(false);
   }, []);
 
   return (
