@@ -5,4 +5,4 @@ httpx>=0.27,<1
 crewai[google-genai]>=1.15.21,<2
 openhands-sdk>=1.47,<2
 openhands-tools>=1.47,<2
-litellm==1.79.0
+litellm==1.93.0
