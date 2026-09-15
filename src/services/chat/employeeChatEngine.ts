@@ -112,7 +112,7 @@ export async function processEmployeeMessage(
     }, projectContext?.id);
 
     if (crewRes.ok) {
-      return { text: `حللت التوجيه فعلياً عبر CrewAI.\n\n${summarizeRuntimeOutput(crewRes.output)}`, executedTools };
+      return { text: `مررت التوجيه فعلياً إلى CrewAI واستلمت النتيجة التالية:\n\n${summarizeRuntimeOutput(crewRes.output)}`, executedTools };
     }
     return { text: `CrewAI ما قدر ينفذ التخطيط الآن: ${crewRes.error || 'لا توجد نتيجة من المحرك.'}`, executedTools };
   }
@@ -178,7 +178,7 @@ export async function processEmployeeMessage(
     }
 
     return {
-      text: `OpenHands نفذ التعديل فعلياً داخل نسخة معزولة. أنشأت لك طلب اعتماد رقم ${decision.id}.\nما انكتب شيء في GitHub إلى الآن. إذا اعتمدته من مركز القرارات، النظام يطبق نفس الـdiff بعد فحص التعارضات والـlint والـbuild ثم يدفعه إلى main.\n\n${summarizeRuntimeOutput(execRes.output)}`,
+      text: `OpenHands نفذ التعديل فعلياً داخل نسخة معزولة. أنشأت لك طلب اعتماد رقم ${decision.id}.\nما انكتب شيء في GitHub إلى الآن. بعد اعتمادك يُحفظ التغيير كاقتراح معتمد وجاهز لمسار GitHub المتصل. تطبيق NAWAF HQ نفسه لن يدفع إلى GitHub بدون صلاحية كتابة backend حقيقية.\n\n${summarizeRuntimeOutput(execRes.output)}`,
       executedTools,
     };
   }
