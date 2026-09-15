@@ -67,8 +67,8 @@ export class OpenHandsEngine {
         return {
           sessionId, agentId: params.agentId, agentName: params.agentName,
           projectId: params.projectId, taskTitle: params.taskTitle,
-          startedAt, completedAt: nowAr(), logs, filesInspected,
-          summary: output?.summary || 'تم التنفيذ عبر OpenHands المتصل فعلياً واستلام النتيجة من الخادم.',
+          startedAt, completedAt: nowAr(), success: true, source: 'openhands-runtime', logs, filesInspected,
+          summary: output?.summary || 'اكتمل التنفيذ عبر OpenHands المتصل فعلياً وتم استلام النتيجة من الخادم.',
           metrics: {
             testsPassed: Number(output?.metrics?.testsPassed ?? output?.testsPassed ?? 0) || 0,
             testsFailed: Number(output?.metrics?.testsFailed ?? output?.testsFailed ?? 0) || 0,
@@ -124,13 +124,17 @@ export class OpenHandsEngine {
     return {
       sessionId, agentId: params.agentId, agentName: params.agentName,
       projectId: params.projectId, taskTitle: params.taskTitle,
-      startedAt, completedAt: nowAr(), logs, filesInspected,
-      summary: state.status === 'CONNECTED'
-        ? 'تعذر تنفيذ OpenHands الخارجي، فتم تشغيل فحوص محلية حقيقية فقط.'
-        : `OpenHands ${state.status === 'NOT_CONFIGURED' ? 'غير مربوط حالياً' : 'غير متاح حالياً'}؛ تم تشغيل فحص المستودع وTypeScript والاختبار المحلي الحقيقي بدون اختلاق نتائج.`,
+      startedAt, completedAt: nowAr(), success: localSuccess, source: 'local-verification', logs, filesInspected,
+      summary: localSuccess
+        ? (state.status === 'CONNECTED'
+            ? 'تعذر تنفيذ OpenHands الخارجي، لكن الفحص المحلي الحقيقي للمستودع وTypeScript والاختبارات اكتمل بنجاح. لم يتم تنفيذ تعديل كود عبر OpenHands.'
+            : `OpenHands ${state.status === 'NOT_CONFIGURED' ? 'غير مربوط حالياً' : 'غير متاح حالياً'}؛ اكتمل الفحص المحلي الحقيقي للمستودع وTypeScript والاختبارات بنجاح، بدون تنفيذ تعديل كود عبر OpenHands.`)
+        : (state.status === 'CONNECTED'
+            ? 'تعذر تنفيذ OpenHands الخارجي، كما أن واحداً أو أكثر من الفحوص المحلية الحقيقية فشل أو لم يكن متاحاً.'
+            : `OpenHands ${state.status === 'NOT_CONFIGURED' ? 'غير مربوط حالياً' : 'غير متاح حالياً'}؛ واحد أو أكثر من الفحوص المحلية الحقيقية فشل أو لم يكن متاحاً.`),
       metrics: {
-        testsPassed: localSuccess ? 1 : 0,
-        testsFailed: localSuccess ? 0 : 1,
+        testsPassed: tests.success ? 1 : 0,
+        testsFailed: tests.success ? 0 : 1,
         zeroCostVerified: false,
       },
     };
