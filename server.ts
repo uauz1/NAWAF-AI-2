@@ -14,7 +14,7 @@ const DEFAULT_RUNTIME_API_URL = 'https://nawaf-hq-crewai-runtime.onrender.com';
 async function pingEngine(url?: string | null): Promise<EngineStatus> {
   if (!url) return 'NOT_CONFIGURED';
   try {
-    const response = await fetch(`${url.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(`${url.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(70000) });
     return response.ok ? 'CONNECTED' : 'ERROR';
   } catch {
     return 'ERROR';
