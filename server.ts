@@ -95,7 +95,7 @@ async function startServer() {
       openhands: {
         ...snapshot.openhands,
         type: 'code_executor',
-        capabilities: snapshot.openhands.status === 'CONNECTED' ? ['modify_file', 'run_command', 'sandbox_execution'] : [],
+        capabilities: snapshot.openhands.status === 'CONNECTED' ? ['modify_file', 'verified_checks', 'sandbox_execution'] : [],
       },
       gemini: snapshot.gemini,
       githubWrite: snapshot.githubWrite,
@@ -175,11 +175,7 @@ ${userMessage}
       });
       const data = await response.json().catch(() => ({}));
       const successful = response.ok && data?.ok === true;
-      return res.status(successful ? 200 : response.status >= 400 ? response.status : 502).json({
-        ...data,
-        ok: successful,
-        decisionId,
-      });
+      return res.status(successful ? 200 : response.status >= 400 ? response.status : 502).json({ ...data, ok: successful, decisionId });
     } catch (error: any) {
       return res.status(500).json({ ok: false, status: 'ERROR', error: error?.message || 'GitHub apply failed.' });
     }
@@ -197,18 +193,14 @@ ${userMessage}
         const pkg = await readPackageJson();
         const files = await scanWorkspace();
         return res.json({
-          ok: true,
-          action,
-          startedAt,
-          finishedAt: new Date().toISOString(),
+          ok: true, action, startedAt, finishedAt: new Date().toISOString(),
           output: {
             source: 'workspace', verifiedOnDisk: true, workspaceRoot,
             packageName: pkg.name || null, packageVersion: pkg.version || null,
             scripts: Object.keys(pkg.scripts || {}), dependencies: Object.keys(pkg.dependencies || {}),
             totalFilesScanned: files.length, files,
             note: 'Only facts read from the current NAWAF-AI-2 workspace are returned. No project tasks, progress, health, or milestones are invented.',
-          },
-          error: null,
+          }, error: null,
         });
       }
 
@@ -226,7 +218,7 @@ ${userMessage}
         return res.status(successful ? 200 : 502).json({ ok: successful, action, startedAt, finishedAt: new Date().toISOString(), output: successful ? data : null, error: successful ? null : (data?.error || data?.detail || 'CrewAI execution failed.') });
       }
 
-      if (['modify_code', 'execute_code', 'run_command', 'modify_file'].includes(action)) {
+      if (['modify_code', 'execute_code', 'modify_file'].includes(action)) {
         const openhandsUrl = process.env.OPENHANDS_API_URL || DEFAULT_RUNTIME_API_URL;
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) return res.status(503).json({ ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null, error: 'GEMINI_API_KEY is not configured in the NAWAF HQ backend.' });
@@ -238,6 +230,10 @@ ${userMessage}
         const data = await response.json().catch(() => ({}));
         const successful = response.ok && data?.ok !== false;
         return res.status(successful ? 200 : 502).json({ ok: successful, action, startedAt, finishedAt: new Date().toISOString(), output: successful ? data : null, error: successful ? null : (data?.error || data?.detail || 'OpenHands execution failed.') });
+      }
+
+      if (action === 'run_command') {
+        return res.status(403).json({ ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null, error: 'Arbitrary shell execution is disabled. Use the trusted lint/test/build verification paths instead.' });
       }
 
       return res.status(400).json({ ok: false, action, startedAt, finishedAt: new Date().toISOString(), output: null, error: `Action "${action}" is not supported.` });
@@ -280,7 +276,7 @@ ${userMessage}
         }
       }
 
-      if (tool === 'modify_file' || tool === 'run_command') {
+      if (tool === 'modify_file') {
         const openhandsUrl = process.env.OPENHANDS_API_URL || DEFAULT_RUNTIME_API_URL;
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) return res.status(503).json({ success: false, tool, status: 'NOT_CONFIGURED', error: 'GEMINI_API_KEY is not configured.' });
@@ -292,6 +288,10 @@ ${userMessage}
         const data = await response.json().catch(() => ({}));
         const successful = response.ok && data?.ok !== false;
         return res.status(successful ? 200 : 502).json({ success: successful, tool, status: successful ? 'CONNECTED' : 'ERROR', data: successful ? data : undefined, error: successful ? undefined : (data?.error || data?.detail || 'OpenHands execution failed.') });
+      }
+
+      if (tool === 'run_command') {
+        return res.status(403).json({ success: false, tool, status: 'DISABLED', durationMs: Date.now() - started, error: 'Arbitrary shell execution is disabled.' });
       }
 
       return res.status(400).json({ success: false, tool, error: `Unsupported tool: ${String(tool)}` });
