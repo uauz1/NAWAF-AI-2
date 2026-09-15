@@ -58,3 +58,22 @@ test('marketing workspace has no simulated scheduling or zero-ad claim', async (
     '+ تحديث الجدولة',
   ]);
 });
+
+test('3D office does not simulate work or advertise fake live collaboration', async () => {
+  const source = await read('src/components/office/InteractiveOffice.tsx');
+  await missing('src/components/office/InteractiveOffice.tsx', [
+    'triggerSimulatedCollaboration',
+    'نبضة تفاعل',
+    'محاكاة',
+  ]);
+  assert.match(source, /READY\/unknown states stay visually neutral/);
+  assert.match(source, /\['WORKING', 'يعمل الآن', 'يطور', 'يصمم'\]\.includes\(emp\.status\)/);
+});
+
+test('activity feed contains no simulation trigger or fake live claim', async () => {
+  await missing('src/components/activity/LiveActivityFeed.tsx', [
+    'triggerSimulatedCollaboration',
+    'محاكاة تفاعل جديد',
+    'متابعة مباشرة لما كان يقوم به فريقك وموظفوك أثناء غيابك',
+  ]);
+});
